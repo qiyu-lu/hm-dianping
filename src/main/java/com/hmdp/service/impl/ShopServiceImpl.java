@@ -10,6 +10,7 @@ import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisData;
 import com.hmdp.utils.ShopBloomFilter;
 import org.apache.tomcat.jni.Time;
@@ -48,6 +49,9 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Autowired
     private ShopBloomFilter shopBloomFilter;
 
+    @Autowired
+    private CacheClient cacheClient;
+
     @Override
     public Result queryShopById(Long id) {
 
@@ -55,9 +59,11 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         if (!shopBloomFilter.mightContain(id)) {
             return Result.fail("店铺不存在");
         }
+       // Shop shop = cacheClient.queryWithPassThrough(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.SECONDS);
+        Shop shop = cacheClient.queryWithLogicalExpire(CACHE_SHOP_KEY,id,Shop.class,this::getById,CACHE_SHOP_TTL,TimeUnit.SECONDS);
 
         // 2️⃣ 选择一种策略
-        Shop shop = queryWithLogicalExpire(id);
+        //Shop shop = queryWithLogicalExpire(id);
         // Shop shop = queryWithMutex(id);
 
         if (shop == null) {
