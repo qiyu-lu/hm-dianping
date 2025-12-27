@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.RedisConstants.LOGIN_CODE_KEY;
+import static com.hmdp.utils.RedisConstants.LOGIN_USER_KEY;
 
 
 public class RefreshTokenInterceptor implements HandlerInterceptor {
@@ -32,7 +33,7 @@ public class RefreshTokenInterceptor implements HandlerInterceptor {
             return true;
         }
         // 基于这个token 作为key获取redis中的用户
-        Map<Object, Object> userMap = stringRedisTemplate.opsForHash().entries(LOGIN_CODE_KEY + token);
+        Map<Object, Object> userMap = stringRedisTemplate.opsForHash().entries(LOGIN_USER_KEY + token);
         if(userMap.isEmpty()){
             return true;
         }
@@ -41,7 +42,7 @@ public class RefreshTokenInterceptor implements HandlerInterceptor {
         UserDTO userDTO = BeanUtil.fillBeanWithMap(userMap, new UserDTO(), false);
         UserHolder.saveUser(userDTO);
         // 刷新token的有效期，为了使只有在登录状态时就一直刷新有效期，否则会慢慢过期，不然会出现，明明用户在登录状态但到了时间仍然退出登录了
-        stringRedisTemplate.expire(LOGIN_CODE_KEY + token, 30, TimeUnit.MINUTES);
+        stringRedisTemplate.expire(LOGIN_USER_KEY + token, 30, TimeUnit.MINUTES);
         // 放行
         return true;
     }

@@ -85,9 +85,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
                 .eq(User::getPhone, phone)
                 .one();
         if(user == null){//如果用户不存在，查询不到，那么就创建新用户，进行保存
+            log.debug("短信登陆用户不存在");
             user = generateUserWithphone(phone);
+            log.debug("新建的用户：{}", user);
             save(user);
         }
+        log.debug("用户存在：{}", user);
         UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);//复制不隐私的信息，不过我认为这里应该使用vo
 
         String token = UUID.randomUUID().toString(true);
@@ -104,7 +107,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         String tokenKey = LOGIN_USER_KEY + token;
         stringRedisTemplate.opsForHash().putAll(tokenKey, userMap);
         stringRedisTemplate.expire(tokenKey, 30, TimeUnit.MINUTES);// 设置有效期（30 分钟）
-
+        log.debug("存入redis中的token：{}", tokenKey);
         //返回token到前端
         return Result.ok(token);
     }
