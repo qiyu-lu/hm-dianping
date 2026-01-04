@@ -34,4 +34,3 @@ Settings → Build Tools → Maven → Runner
 ```yaml
 JRE = Project JDK（选择 JDK 1.8）
 ```
-

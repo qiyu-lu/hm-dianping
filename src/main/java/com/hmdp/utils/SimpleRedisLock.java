@@ -2,6 +2,7 @@ package com.hmdp.utils;
 
 import org.springframework.data.redis.core.StringRedisTemplate;
 
+import java.util.Collections;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -27,11 +28,10 @@ public class SimpleRedisLock implements ILock {
     }
     @Override
     public void unlock(String key){
-        String realKey = KEY_PREFIX + key;
-
-        String value = stringRedisTemplate.opsForValue().get(realKey);
-        if (lockValue.equals(value)) {
-            stringRedisTemplate.delete(realKey);
-        }
+        stringRedisTemplate.execute(
+                RedisLuaScript.UNLOCK_SCRIPT,
+                Collections.singletonList(KEY_PREFIX + key),
+                lockValue
+        );
     }
 }

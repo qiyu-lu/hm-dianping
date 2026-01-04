@@ -65,7 +65,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         SimpleRedisLock lock = new SimpleRedisLock(stringRedisTemplate);
         String lockKey = "order:" + userId;
 
-        boolean success = lock.lock(lockKey,1200L);
+        boolean success = lock.lock(lockKey,12000L);
         if(!success){
             return Result.fail("不能重复多次下单");//这里抢购就不采用重复进行的策略，而是采用直接终止
         }
