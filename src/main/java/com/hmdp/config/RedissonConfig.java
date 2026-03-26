@@ -15,6 +15,8 @@ public class RedissonConfig {
         config.useSingleServer()
                 .setAddress("redis://106.55.100.135:6379")
                 .setPassword("redis123");
+//                // ↓↓↓ 关键修改：减小主连接池大小 ↓↓↓
+//                .setConnectionPoolSize(10); // 默认是64，我们把它降到10;
         return Redisson.create(config);
     }
 }
