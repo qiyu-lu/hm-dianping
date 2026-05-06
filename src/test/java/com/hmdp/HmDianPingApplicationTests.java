@@ -4,17 +4,28 @@ import com.hmdp.entity.Shop;
 import com.hmdp.service.impl.ShopServiceImpl;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisIdWorker;
+import io.lettuce.core.api.async.RedisGeoAsyncCommands;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.geo.Point;
+import org.springframework.data.redis.connection.RedisGeoCommands;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
+import static com.hmdp.utils.RedisConstants.SHOP_GEO_KEY;
 
 @Slf4j
 @SpringBootTest
@@ -24,6 +35,8 @@ class HmDianPingApplicationTests {
     private ShopServiceImpl shopService;
     @Resource
     private CacheClient  cacheClient;
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
 
     @Test
     void testSaveShop2RedisCache() throws InterruptedException {
@@ -71,5 +84,30 @@ class HmDianPingApplicationTests {
 
         long end = System.currentTimeMillis();
         System.out.println("耗时：" + (end - begin) + " ms");
+    }
+
+    //将数据商户数据存入redis
+    @Test
+    void loadShopData(){
+        //查询店铺信息
+        List<Shop> list = shopService.list();
+        //将店铺按照tyepId分组，一致的放到一个集合
+        Map<Long, List<Shop>> map = list.stream().collect(Collectors.groupingBy(Shop::getTypeId));
+        //分批完成写入redis
+        for(Map.Entry<Long, List<Shop>> entry : map.entrySet()){
+            Long typeId = entry.getKey();
+            String key = SHOP_GEO_KEY + typeId;
+            List<Shop> value = entry.getValue();
+
+            //写入redis GEOADD key 经度纬度 member
+            List<RedisGeoCommands.GeoLocation<String>> locations = new ArrayList<>(value.size());
+            for (Shop shop : value) {
+                locations.add(new RedisGeoCommands.GeoLocation<>(
+                        shop.getId().toString(), new Point(shop.getX(), shop.getY())
+                ));
+            }
+
+            stringRedisTemplate.opsForGeo().add(key, locations);
+        }
     }
 }
