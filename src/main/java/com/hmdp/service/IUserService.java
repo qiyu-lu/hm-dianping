@@ -22,4 +22,6 @@ public interface IUserService extends IService<User> {
     public Result me();
 
     Result logout(String token);
+
+    Result sign();
 }

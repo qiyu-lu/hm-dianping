@@ -22,6 +22,7 @@ import javax.xml.ws.Action;
 
 import java.time.LocalDateTime;
 
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -131,6 +132,22 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         // 直接从 Redis 中删除用户信息
         stringRedisTemplate.delete(LOGIN_USER_KEY + token);
         // 无需操作 UserHolder，因为拦截器的 afterCompletion 会统一清理
+        return Result.ok();
+    }
+
+    @Override
+    public Result sign() {
+        //获取当前登录用户
+        Long userId = UserHolder.getUser().getId();
+        //获取日期
+        LocalDateTime now = LocalDateTime.now();
+        //拼接key
+        String keySuffix = now.format(DateTimeFormatter.ofPattern(":yyyyMM"));
+        String key = USER_SIGN_KEY + userId + keySuffix;
+        //获取今天是本月的第几天，来设置第几位的状态
+        int dayOfMonth = now.getDayOfMonth();
+        //写入reids
+        stringRedisTemplate.opsForValue().setBit(key, dayOfMonth - 1, true);
         return Result.ok();
     }
 }
