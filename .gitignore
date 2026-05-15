@@ -36,3 +36,9 @@ build/
 ### mysql and ridis data ###
 /mysql-data/
 /redis-data/
+
+### benchmark generated files ###
+/benchmark/*.csv
+/benchmark/*.jtl
+/benchmark/*.log
+/benchmark/report*/

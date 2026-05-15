@@ -19,6 +19,7 @@ import org.springframework.data.redis.connection.stream.*;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -58,6 +59,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private Environment environment;
     @Autowired
     private RedissonClient redissonClient;
 
@@ -75,6 +78,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Profile("!test")
     @PostConstruct
     private void init() {
+        if (Arrays.asList(environment.getActiveProfiles()).contains("test")) {
+            log.info("Skip seckill order consumer in test profile.");
+            return;
+        }
         // 确保Redis Stream和消费者组存在
         try {
             stringRedisTemplate.opsForStream().createGroup(streamKey, ReadOffset.from("0"), groupName);
@@ -86,7 +93,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 // 创建Stream（通过添加一个虚拟消息）
                 stringRedisTemplate.opsForStream().add(streamKey, Collections.singletonMap("init", "true"));
                 // 创建Group
-                stringRedisTemplate.opsForStream().createGroup(streamKey, ReadOffset.from("0"), groupName);
+                stringRedisTemplate.opsForStream().createGroup(streamKey, ReadOffset.latest(), groupName);
             } else if (message != null && message.contains("BUSYGROUP Consumer Group name already exists")) {
                 // Group已存在，属于正常情况
                 log.info("Consumer group '{}' already exists.", groupName);

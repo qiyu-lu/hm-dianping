@@ -1,0 +1,327 @@
+# JMeter 使用说明
+
+## 适用场景
+
+本文档记录本项目优惠券秒杀接口的 JMeter 使用流程。JMeter 用于产生可复现的并发请求和压测报告；Apifox 更适合单接口冒烟验证，不适合作为正式压测工具。
+
+当前秒杀接口：
+
+```text
+POST http://localhost:8083/voucher-order/seckill/{voucherId}
+```
+
+## 启动 JMeter
+
+确认 JMeter 可用：
+
+```bash
+jmeter -v
+```
+
+打开图形界面：
+
+```bash
+jmeter
+```
+
+正式压测更推荐命令行模式，图形界面主要用于调试脚本和导出报告。
+
+## 核心参数
+
+JMeter 并发主要在 `Thread Group` 中设置：
+
+| 参数 | 含义 | 本项目示例 |
+| --- | --- | --- |
+| Number of Threads (users) | 虚拟用户数，也就是并发线程数 | `100` 表示 100 个虚拟用户 |
+| Ramp-Up Period (seconds) | 在多少秒内启动完所有线程 | `5` 表示 100 个线程在 5 秒内启动完 |
+| Loop Count | 每个线程重复请求次数 | `1` 表示每个用户请求 1 次 |
+
+总请求数大致等于：
+
+```text
+Number of Threads * Loop Count
+```
+
+例如：
+
+```text
+Number of Threads = 100
+Ramp-Up = 5
+Loop Count = 1
+```
+
+含义是：5 秒内启动 100 个虚拟用户，每个用户请求 1 次秒杀接口，总请求数约为 100。
+
+## GUI 配置流程
+
+### Test Plan
+
+将 `Test Plan` 命名为：
+
+```text
+hm-dianping-seckill-benchmark
+```
+
+添加用户变量：
+
+| Name | Value |
+| --- | --- |
+| host | `localhost` |
+| port | `8083` |
+| voucherId | 压测工具日志中的秒杀券 id |
+
+### Thread Group
+
+右键 `Test Plan`：
+
+```text
+Add -> Threads (Users) -> Thread Group
+```
+
+冒烟测试：
+
+```text
+Number of Threads: 1
+Ramp-Up Period: 1
+Loop Count: 1
+```
+
+100 并发基线：
+
+```text
+Number of Threads: 100
+Ramp-Up Period: 5
+Loop Count: 1
+```
+
+超卖压力测试可以把 `Number of Threads` 改成 `300` 或 `500`，库存仍保持 `100`。预期最终订单数仍不超过 100。
+
+### CSV Data Set Config
+
+右键 `Thread Group`：
+
+```text
+Add -> Config Element -> CSV Data Set Config
+```
+
+配置：
+
+```text
+Filename: /home/sd101t/IdeaProjects/hm-dianping/benchmark/tokens.csv
+Variable Names: token,userId,phone
+Delimiter: ,
+Ignore first line: False
+Recycle on EOF: True
+Stop thread on EOF: False
+Sharing mode: All threads
+```
+
+`tokens.csv` 不包含表头，每行格式：
+
+```text
+token,userId,phone
+```
+
+### HTTP Header Manager
+
+右键 `Thread Group`：
+
+```text
+Add -> Config Element -> HTTP Header Manager
+```
+
+添加：
+
+```text
+authorization: ${token}
+Content-Type: application/json
+```
+
+### HTTP Request Defaults
+
+右键 `Thread Group`：
+
+```text
+Add -> Config Element -> HTTP Request Defaults
+```
+
+配置：
+
+```text
+Protocol: http
+Server Name or IP: ${host}
+Port Number: ${port}
+```
+
+### HTTP Request
+
+右键 `Thread Group`：
+
+```text
+Add -> Sampler -> HTTP Request
+```
+
+配置：
+
+```text
+Name: seckill voucher
+Method: POST
+Path: /voucher-order/seckill/${voucherId}
+```
+
+Body 不需要填写。
+
+### Listener
+
+调试阶段可以添加：
+
+```text
+Add -> Listener -> View Results Tree
+Add -> Listener -> Summary Report
+Add -> Listener -> Aggregate Report
+```
+
+正式压测时尽量不要打开 `View Results Tree`，它会消耗内存并影响结果。正式数据建议使用 `Summary Report`、`Aggregate Report` 或命令行 HTML Dashboard。
+
+## 压测前流程
+
+1. 准备测试用户和 token：
+
+```bash
+mvn -Dtest=BenchmarkDataTool#prepareBenchmarkUsersAndTokens test
+```
+
+2. 重置秒杀库存、订单、Redis key 和 Stream：
+
+```bash
+mvn -Dtest=BenchmarkDataTool#resetSeckillBenchmarkData test
+```
+
+3. 确认 JMeter 中的 `voucherId` 与重置工具日志中的 voucherId 一致。
+
+4. 先用 1 线程冒烟测试，再改成 100/300/500 并发。
+
+## 报告导出
+
+Summary Report 导出文件建议命名：
+
+```text
+docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-15-seckill-baseline-lua-stream-100t-summary-1.csv
+```
+
+Aggregate Report 导出文件建议命名：
+
+```text
+docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-15-seckill-baseline-lua-stream-100t-aggregate-1.csv
+```
+
+命名规则：
+
+```text
+YYYY-MM-DD-模块-版本-并发数t-报告类型-轮次.csv
+```
+
+例如：
+
+```text
+2026-05-15-seckill-baseline-lua-stream-100t-aggregate-1.csv
+2026-05-15-seckill-optimized-lua-stream-100t-aggregate-1.csv
+```
+
+每轮导出前要清空 Listener 结果，避免历史运行累计导致 Summary 和 Aggregate 样本数不一致。
+
+## 命令行运行
+
+冒烟测试：
+
+```bash
+mkdir -p benchmark
+jmeter -n -t "docs/Summary Report.jmx" -l benchmark/seckill-smoke.jtl
+```
+
+生成 HTML Dashboard：
+
+```bash
+rm -rf benchmark/report-2026-05-15-seckill-baseline-lua-stream-100t
+jmeter -n \
+  -t "docs/Summary Report.jmx" \
+  -l benchmark/2026-05-15-seckill-baseline-lua-stream-100t.jtl \
+  -e \
+  -o benchmark/report-2026-05-15-seckill-baseline-lua-stream-100t
+```
+
+HTML 报告中 `Statistics` 区域的字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| Throughput | 吞吐量 |
+| Average | 平均响应时间 |
+| 90th pct / 90% Line | P90 |
+| 95th pct / 95% Line | P95 |
+| 99th pct / 99% Line | P99 |
+| Error % | HTTP 请求错误率 |
+
+## 压测后校验
+
+JMeter 的 `Error % = 0` 只代表 HTTP 层没有失败，不代表业务一定成功。秒杀压测后必须检查 MySQL 和 Redis。
+
+订单数：
+
+```sql
+SELECT COUNT(*)
+FROM tb_voucher_order
+WHERE voucher_id = ${voucherId};
+```
+
+重复下单：
+
+```sql
+SELECT user_id, COUNT(*) AS cnt
+FROM tb_voucher_order
+WHERE voucher_id = ${voucherId}
+GROUP BY user_id
+HAVING cnt > 1;
+```
+
+DB 库存：
+
+```sql
+SELECT voucher_id, stock
+FROM tb_seckill_voucher
+WHERE voucher_id = ${voucherId};
+```
+
+Redis：
+
+```bash
+redis-cli -a redis123 GET seckill:stock:${voucherId}
+redis-cli -a redis123 SCARD seckill:order:${voucherId}
+redis-cli -a redis123 XLEN stream.orders
+redis-cli -a redis123 XPENDING stream.orders g1
+```
+
+有效基线至少需要满足：
+
+- DB 订单数不超过初始库存。
+- 重复下单 SQL 结果为空。
+- DB 库存不小于 0。
+- Redis 库存与已购集合数量符合预期。
+- Stream pending-list 为 0。
+
+## 结果记录
+
+每轮有效结果写入：
+
+```text
+docs/benchmark-results.md
+```
+
+建议记录：
+
+- 实现版本
+- JMeter 配置
+- Summary Report 指标
+- Aggregate Report 的 P95/P99
+- MySQL 正确性校验
+- Redis 正确性校验
+- 当前结论和下一步改进
