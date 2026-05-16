@@ -1,0 +1,513 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+DATE="$(date +%F)"
+MODULE="seckill"
+IMPL="baseline-lua-stream"
+SCENARIO="seckill-baseline-lua-stream"
+THREADS=100
+LOOPS=1
+RAMP_UP=5
+STOCK=100
+USER_COUNT=1000
+EXPECTED_ORDERS=""
+VOUCHER_ID=""
+ROUND=""
+HOST="localhost"
+PORT=8083
+TOKENS_FILE="benchmark/tokens.csv"
+JMETER_PLAN="docs/Summary Report.jmx"
+POLL_INTERVAL_MS=50
+DRAIN_TIMEOUT_MS=30000
+MYSQL_CONTAINER="hmdp-mysql"
+REDIS_CONTAINER="hmdp-redis"
+MYSQL_USER="root"
+MYSQL_PASSWORD="root123"
+MYSQL_DATABASE="hmdp"
+REDIS_PASSWORD="redis123"
+JAVA_HOME="${JAVA_HOME:-/home/sd101t/.jdks/dragonwell-ex-1.8.0_472}"
+MAVEN_CMD="${MAVEN_CMD:-}"
+SKIP_PREPARE=0
+SKIP_RESET=0
+SKIP_HTML=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/run-seckill-benchmark.sh [options]
+
+Options:
+  --threads N             JMeter thread count. Default: 100
+  --loops N               JMeter loop count. Default: 1
+  --ramp-up N             JMeter ramp-up seconds. Default: 5
+  --stock N               Benchmark seckill stock. Default: 100
+  --user-count N          Generated benchmark user/token count. Default: 1000
+  --expected-orders N     Expected final MySQL order count. Default: min(stock, threads * loops, user-count)
+  --voucher-id N          Existing seckill voucher id. If omitted, BenchmarkDataTool resolves one.
+  --round N               Same-scenario run number. Default: next available round for the same day/scenario.
+  --host HOST             Target host for JMeter. Default: localhost
+  --port PORT             Target port for JMeter. Default: 8083
+  --tokens-file PATH      Token CSV path. Default: benchmark/tokens.csv
+  --scenario NAME         Output folder under docs/JmeterTestSummary. Default: seckill-baseline-lua-stream
+  --impl NAME             File-name implementation label. Default: baseline-lua-stream
+  --maven-cmd PATH        Maven executable path. Default: mvn, ./mvnw, or IDEA bundled Maven.
+  --java-home PATH        JAVA_HOME for Maven benchmark helpers. Default: Dragonwell JDK 8 in ~/.jdks.
+  --poll-ms N             MySQL/Redis polling interval after JMeter exits. Default: 50
+  --timeout-ms N          Drain wait timeout. Default: 30000
+  --skip-prepare          Do not regenerate benchmark users/tokens.
+  --skip-reset            Do not reset stock/orders/Redis keys before JMeter.
+  --skip-html             Do not generate JMeter HTML dashboard.
+  -h, --help              Show this help.
+
+Example:
+  scripts/run-seckill-benchmark.sh \
+    --threads 5000 \
+    --loops 5 \
+    --stock 1000 \
+    --user-count 5000 \
+    --voucher-id 11 \
+    --round 1
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --threads) THREADS="$2"; shift 2 ;;
+    --loops) LOOPS="$2"; shift 2 ;;
+    --ramp-up) RAMP_UP="$2"; shift 2 ;;
+    --stock) STOCK="$2"; shift 2 ;;
+    --user-count) USER_COUNT="$2"; shift 2 ;;
+    --expected-orders) EXPECTED_ORDERS="$2"; shift 2 ;;
+    --voucher-id) VOUCHER_ID="$2"; shift 2 ;;
+    --round) ROUND="$2"; shift 2 ;;
+    --host) HOST="$2"; shift 2 ;;
+    --port) PORT="$2"; shift 2 ;;
+    --tokens-file) TOKENS_FILE="$2"; shift 2 ;;
+    --scenario) SCENARIO="$2"; shift 2 ;;
+    --impl) IMPL="$2"; shift 2 ;;
+    --maven-cmd) MAVEN_CMD="$2"; shift 2 ;;
+    --java-home) JAVA_HOME="$2"; shift 2 ;;
+    --poll-ms) POLL_INTERVAL_MS="$2"; shift 2 ;;
+    --timeout-ms) DRAIN_TIMEOUT_MS="$2"; shift 2 ;;
+    --skip-prepare) SKIP_PREPARE=1; shift ;;
+    --skip-reset) SKIP_RESET=1; shift ;;
+    --skip-html) SKIP_HTML=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+require_cmd jmeter
+require_cmd docker
+require_cmd python3
+
+resolve_maven_cmd() {
+  if [[ -n "$MAVEN_CMD" ]]; then
+    printf '%s\n' "$MAVEN_CMD"
+    return
+  fi
+  if [[ -x "./mvnw" ]]; then
+    printf '%s\n' "./mvnw"
+    return
+  fi
+  if command -v mvn >/dev/null 2>&1; then
+    command -v mvn
+    return
+  fi
+  if [[ -x "/opt/idea/plugins/maven/lib/maven3/bin/mvn" ]]; then
+    printf '%s\n' "/opt/idea/plugins/maven/lib/maven3/bin/mvn"
+    return
+  fi
+  echo "Missing required Maven command. Set --maven-cmd /path/to/mvn or MAVEN_CMD=/path/to/mvn." >&2
+  exit 1
+}
+
+MAVEN_CMD="$(resolve_maven_cmd)"
+if [[ ! -x "$MAVEN_CMD" && "$MAVEN_CMD" != "./mvnw" ]]; then
+  echo "Maven command is not executable: $MAVEN_CMD" >&2
+  exit 1
+fi
+if [[ -n "$JAVA_HOME" && ! -x "$JAVA_HOME/bin/java" ]]; then
+  echo "JAVA_HOME does not contain an executable bin/java: $JAVA_HOME" >&2
+  exit 1
+fi
+export JAVA_HOME
+export PATH="$JAVA_HOME/bin:$PATH"
+
+TOTAL_REQUESTS=$((THREADS * LOOPS))
+if [[ -z "$EXPECTED_ORDERS" ]]; then
+  EXPECTED_ORDERS="$STOCK"
+  if (( TOTAL_REQUESTS < EXPECTED_ORDERS )); then
+    EXPECTED_ORDERS="$TOTAL_REQUESTS"
+  fi
+  if (( USER_COUNT < EXPECTED_ORDERS )); then
+    EXPECTED_ORDERS="$USER_COUNT"
+  fi
+fi
+
+RESULT_DIR="docs/JmeterTestSummary/${SCENARIO}"
+BENCHMARK_DIR="benchmark"
+RUN_ID_PREFIX="${DATE}-${MODULE}-${IMPL}-${THREADS}t-${LOOPS}l"
+if [[ -z "$ROUND" ]]; then
+  ROUND=1
+  while [[ -e "${RESULT_DIR}/${RUN_ID_PREFIX}-summary-r${ROUND}.csv" \
+    || -e "${RESULT_DIR}/${RUN_ID_PREFIX}-aggregate-r${ROUND}.csv" \
+    || -e "${BENCHMARK_DIR}/${RUN_ID_PREFIX}-r${ROUND}.jtl" ]]; do
+    ROUND=$((ROUND + 1))
+  done
+fi
+RUN_ID="${RUN_ID_PREFIX}-r${ROUND}"
+SUMMARY_CSV="${RESULT_DIR}/${RUN_ID_PREFIX}-summary-r${ROUND}.csv"
+AGGREGATE_CSV="${RESULT_DIR}/${RUN_ID_PREFIX}-aggregate-r${ROUND}.csv"
+METRICS_CSV="${RESULT_DIR}/metrics.csv"
+JTL_FILE="${BENCHMARK_DIR}/${RUN_ID}.jtl"
+HTML_REPORT_DIR="${BENCHMARK_DIR}/report-${RUN_ID}"
+RUN_SUMMARY="${RESULT_DIR}/${RUN_ID}-run-summary.md"
+
+mkdir -p "$RESULT_DIR" "$BENCHMARK_DIR"
+
+if [[ "$SKIP_PREPARE" -eq 0 ]]; then
+  "$MAVEN_CMD" \
+    -Dtest=BenchmarkDataTool#prepareBenchmarkUsersAndTokens \
+    -Dbench.userCount="$USER_COUNT" \
+    -Dbench.tokensFile="$TOKENS_FILE" \
+    test
+fi
+
+if [[ "$SKIP_RESET" -eq 0 ]]; then
+  reset_cmd=(
+    "$MAVEN_CMD"
+    -Dtest=BenchmarkDataTool#resetSeckillBenchmarkData
+    -Dbench.stock="$STOCK"
+    test
+  )
+  if [[ -n "$VOUCHER_ID" ]]; then
+    reset_cmd=(
+      "$MAVEN_CMD"
+      -Dtest=BenchmarkDataTool#resetSeckillBenchmarkData
+      -Dbench.stock="$STOCK"
+      -Dbench.voucherId="$VOUCHER_ID"
+      test
+    )
+  fi
+  reset_output="$("${reset_cmd[@]}" 2>&1 | tee "${BENCHMARK_DIR}/${RUN_ID}-reset.log")"
+  if [[ -z "$VOUCHER_ID" ]]; then
+    VOUCHER_ID="$(printf '%s\n' "$reset_output" | sed -n 's/.*voucherId=\([0-9][0-9]*\).*/\1/p' | tail -1)"
+  fi
+fi
+
+if [[ -z "$VOUCHER_ID" ]]; then
+  echo "voucherId was not provided and could not be parsed from reset output." >&2
+  exit 1
+fi
+
+rm -f "$JTL_FILE" "$SUMMARY_CSV" "$AGGREGATE_CSV"
+if [[ "$SKIP_HTML" -eq 0 ]]; then
+  rm -rf "$HTML_REPORT_DIR"
+fi
+
+jmeter_cmd=(
+  jmeter
+  -n
+  -t "$JMETER_PLAN"
+  -l "$JTL_FILE"
+  -Jhost="$HOST"
+  -Jport="$PORT"
+  -JvoucherId="$VOUCHER_ID"
+  -Jthreads="$THREADS"
+  -JrampUp="$RAMP_UP"
+  -Jloops="$LOOPS"
+  -JtokensFile="$ROOT_DIR/$TOKENS_FILE"
+  -Jjmeter.save.saveservice.output_format=csv
+  -Jjmeter.save.saveservice.print_field_names=true
+  -Jjmeter.save.saveservice.timestamp_format=ms
+)
+
+jmeter_start_ms="$(date +%s%3N)"
+"${jmeter_cmd[@]}"
+jmeter_end_ms="$(date +%s%3N)"
+jmeter_elapsed_ms=$((jmeter_end_ms - jmeter_start_ms))
+
+mysql_scalar() {
+  docker exec "$MYSQL_CONTAINER" mysql -N -B -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" \
+    -e "$1" 2>/dev/null | tail -1
+}
+
+redis_scalar() {
+  docker exec "$REDIS_CONTAINER" redis-cli -a "$REDIS_PASSWORD" --raw "$@" 2>/dev/null | sed -n '1p'
+}
+
+drain_start_ms="$(date +%s%3N)"
+deadline_ms=$((drain_start_ms + DRAIN_TIMEOUT_MS))
+orders=0
+pending=0
+
+while true; do
+  orders="$(mysql_scalar "SELECT COUNT(*) FROM tb_voucher_order WHERE voucher_id = ${VOUCHER_ID};")"
+  pending="$(redis_scalar XPENDING stream.orders g1)"
+  orders="${orders:-0}"
+  pending="${pending:-0}"
+
+  if [[ "$orders" -ge "$EXPECTED_ORDERS" && "$pending" == "0" ]]; then
+    break
+  fi
+
+  now_ms="$(date +%s%3N)"
+  if (( now_ms >= deadline_ms )); then
+    echo "Timed out waiting for drain: orders=${orders}, expected=${EXPECTED_ORDERS}, pending=${pending}" >&2
+    break
+  fi
+
+  sleep "$(python3 - "$POLL_INTERVAL_MS" <<'PY'
+import sys
+print(int(sys.argv[1]) / 1000.0)
+PY
+)"
+done
+
+drain_end_ms="$(date +%s%3N)"
+drain_ms=$((drain_end_ms - drain_start_ms))
+db_stock="$(mysql_scalar "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = ${VOUCHER_ID};")"
+duplicate_orders="$(mysql_scalar "SELECT COUNT(*) FROM (SELECT user_id, COUNT(*) AS cnt FROM tb_voucher_order WHERE voucher_id = ${VOUCHER_ID} GROUP BY user_id HAVING cnt > 1) t;")"
+redis_stock="$(redis_scalar GET "seckill:stock:${VOUCHER_ID}")"
+redis_order_count="$(redis_scalar SCARD "seckill:order:${VOUCHER_ID}")"
+stream_len="$(redis_scalar XLEN stream.orders)"
+RUN_SUMMARY_LINK="${RUN_SUMMARY#docs/}"
+
+python3 - "$JTL_FILE" "$SUMMARY_CSV" "$AGGREGATE_CSV" <<'PY'
+import csv
+import math
+import statistics
+import sys
+
+jtl_path, summary_path, aggregate_path = sys.argv[1:4]
+
+with open(jtl_path, newline="", encoding="utf-8") as f:
+    rows = list(csv.DictReader(f))
+
+if not rows:
+    raise SystemExit("JTL file has no samples")
+
+def percentile(values, pct):
+    if not values:
+        return 0
+    ordered = sorted(values)
+    index = int(math.ceil(pct / 100.0 * len(ordered))) - 1
+    index = max(0, min(index, len(ordered) - 1))
+    return ordered[index]
+
+def build_stats(label, items):
+    elapsed = [int(r["elapsed"]) for r in items]
+    timestamps = [int(r["timeStamp"]) for r in items]
+    ends = [int(r["timeStamp"]) + int(r["elapsed"]) for r in items]
+    bytes_sum = sum(int(r.get("bytes") or 0) for r in items)
+    sent_sum = sum(int(r.get("sentBytes") or 0) for r in items)
+    duration_sec = max((max(ends) - min(timestamps)) / 1000.0, 0.001)
+    errors = sum(1 for r in items if str(r.get("success", "")).lower() != "true")
+    avg = sum(elapsed) / len(elapsed)
+    stddev = statistics.pstdev(elapsed) if len(elapsed) > 1 else 0.0
+    return {
+        "Label": label,
+        "# Samples": len(items),
+        "Average": round(avg),
+        "Min": min(elapsed),
+        "Max": max(elapsed),
+        "Std. Dev.": f"{stddev:.2f}",
+        "Error %": f"{(errors / len(items) * 100):.3f}%",
+        "Throughput": f"{(len(items) / duration_sec):.5f}",
+        "Received KB/sec": f"{(bytes_sum / 1024.0 / duration_sec):.2f}",
+        "Sent KB/sec": f"{(sent_sum / 1024.0 / duration_sec):.2f}",
+        "Avg. Bytes": f"{(bytes_sum / len(items)):.1f}",
+        "Median": percentile(elapsed, 50),
+        "90% Line": percentile(elapsed, 90),
+        "95% Line": percentile(elapsed, 95),
+        "99% Line": percentile(elapsed, 99),
+    }
+
+labels = []
+by_label = {}
+for row in rows:
+    label = row["label"]
+    if label not in by_label:
+        labels.append(label)
+        by_label[label] = []
+    by_label[label].append(row)
+
+stats = [build_stats(label, by_label[label]) for label in labels]
+stats.append(build_stats("TOTAL", rows))
+
+summary_fields = [
+    "Label", "# Samples", "Average", "Min", "Max", "Std. Dev.",
+    "Error %", "Throughput", "Received KB/sec", "Sent KB/sec", "Avg. Bytes",
+]
+aggregate_fields = [
+    "Label", "# Samples", "Average", "Median", "90% Line", "95% Line",
+    "99% Line", "Min", "Max", "Error %", "Throughput",
+    "Received KB/sec", "Sent KB/sec",
+]
+
+for path, fields in ((summary_path, summary_fields), (aggregate_path, aggregate_fields)):
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(stats)
+PY
+
+read -r samples avg_ms median_ms p90_ms p95_ms p99_ms min_ms max_ms error_pct throughput <<< "$(
+  python3 - "$AGGREGATE_CSV" <<'PY'
+import csv
+import sys
+
+with open(sys.argv[1], newline="", encoding="utf-8") as f:
+    rows = list(csv.DictReader(f))
+
+total = next(row for row in rows if row["Label"] == "TOTAL")
+print(
+    total["# Samples"],
+    total["Average"],
+    total["Median"],
+    total["90% Line"],
+    total["95% Line"],
+    total["99% Line"],
+    total["Min"],
+    total["Max"],
+    total["Error %"],
+    total["Throughput"],
+)
+PY
+)"
+
+expected_redis_stock=$((STOCK - EXPECTED_ORDERS))
+correctness="pass"
+if (( orders != EXPECTED_ORDERS )); then correctness="fail"; fi
+if (( duplicate_orders != 0 )); then correctness="fail"; fi
+if (( db_stock < 0 )); then correctness="fail"; fi
+if [[ "$pending" != "0" ]]; then correctness="fail"; fi
+if [[ "$redis_order_count" != "$EXPECTED_ORDERS" ]]; then correctness="fail"; fi
+if [[ "$redis_stock" != "$expected_redis_stock" ]]; then correctness="fail"; fi
+
+export DATE RUN_ID SCENARIO THREADS LOOPS STOCK USER_COUNT EXPECTED_ORDERS VOUCHER_ID ROUND
+export IMPLEMENTATION="$IMPL"
+export RAMP_UP_SECONDS="$RAMP_UP"
+export TOTAL_REQUESTS="$TOTAL_REQUESTS"
+export SAMPLES="$samples"
+export THROUGHPUT="$throughput"
+export AVG_MS="$avg_ms"
+export MEDIAN_MS="$median_ms"
+export P90_MS="$p90_ms"
+export P95_MS="$p95_ms"
+export P99_MS="$p99_ms"
+export MIN_MS="$min_ms"
+export MAX_MS="$max_ms"
+export ERROR_PCT="$error_pct"
+export JMETER_ELAPSED_MS="$jmeter_elapsed_ms"
+export DRAIN_MS="$drain_ms"
+export POLL_INTERVAL_MS="$POLL_INTERVAL_MS"
+export MYSQL_ORDERS="$orders"
+export MYSQL_STOCK="$db_stock"
+export DUPLICATE_ORDERS="$duplicate_orders"
+export REDIS_STOCK="$redis_stock"
+export REDIS_ORDER_COUNT="$redis_order_count"
+export STREAM_LEN="$stream_len"
+export STREAM_PENDING="$pending"
+export CORRECTNESS="$correctness"
+export RUN_SUMMARY="$RUN_SUMMARY"
+export JTL_FILE="$JTL_FILE"
+export SUMMARY_CSV="$SUMMARY_CSV"
+export AGGREGATE_CSV="$AGGREGATE_CSV"
+export HTML_REPORT="$([[ "$SKIP_HTML" -eq 0 ]] && printf '%s' "${HTML_REPORT_DIR}" || printf 'skipped')"
+
+python3 - "$METRICS_CSV" <<'PY'
+import csv
+import os
+import sys
+
+path = sys.argv[1]
+fields = [
+    "date", "run_id", "scenario", "implementation", "threads", "loops",
+    "ramp_up_seconds", "total_requests", "stock", "user_count",
+    "expected_orders", "voucher_id", "round", "samples", "throughput",
+    "avg_ms", "median_ms", "p90_ms", "p95_ms", "p99_ms", "min_ms",
+    "max_ms", "error_pct", "jmeter_elapsed_ms", "drain_ms",
+    "poll_interval_ms", "mysql_orders", "mysql_stock", "duplicate_orders",
+    "redis_stock", "redis_order_count", "stream_len", "stream_pending",
+    "correctness", "run_summary", "jtl_file", "summary_csv",
+    "aggregate_csv", "html_report",
+]
+row = {field: os.environ.get(field.upper(), "") for field in fields}
+existing = []
+if os.path.exists(path) and os.path.getsize(path) > 0:
+    with open(path, newline="", encoding="utf-8") as f:
+        existing = [r for r in csv.DictReader(f) if r.get("run_id") != row["run_id"]]
+
+with open(path, "w", newline="", encoding="utf-8") as f:
+    writer = csv.DictWriter(f, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(existing)
+    writer.writerow(row)
+PY
+
+cat > "$RUN_SUMMARY" <<EOF
+# Seckill Benchmark Run Summary
+
+- run_id: ${RUN_ID}
+- date: ${DATE}
+- scenario: ${SCENARIO}
+- implementation: ${IMPL}
+- voucher_id: ${VOUCHER_ID}
+- stock: ${STOCK}
+- expected_orders: ${EXPECTED_ORDERS}
+- threads: ${THREADS}
+- loops: ${LOOPS}
+- ramp_up_seconds: ${RAMP_UP}
+- total_requests: ${TOTAL_REQUESTS}
+- samples: ${samples}
+- throughput: ${throughput}
+- avg_ms: ${avg_ms}
+- median_ms: ${median_ms}
+- p90_ms: ${p90_ms}
+- p95_ms: ${p95_ms}
+- p99_ms: ${p99_ms}
+- max_ms: ${max_ms}
+- error_pct: ${error_pct}
+- jmeter_elapsed_ms: ${jmeter_elapsed_ms}
+- drain_ms: ${drain_ms}
+- poll_interval_ms: ${POLL_INTERVAL_MS}
+- java_home: ${JAVA_HOME}
+- maven_cmd: ${MAVEN_CMD}
+- mysql_orders: ${orders}
+- mysql_stock: ${db_stock}
+- duplicate_orders: ${duplicate_orders}
+- redis_stock: ${redis_stock}
+- redis_order_count: ${redis_order_count}
+- stream_len: ${stream_len}
+- stream_pending: ${pending}
+- correctness: ${correctness}
+- metrics_csv: ${METRICS_CSV}
+- jtl_file: ${JTL_FILE}
+- summary_csv: ${SUMMARY_CSV}
+- aggregate_csv: ${AGGREGATE_CSV}
+- html_report: $([[ "$SKIP_HTML" -eq 0 ]] && printf '%s' "${HTML_REPORT_DIR}" || printf 'skipped')
+
+## Markdown Row
+
+| ${DATE} | ${IMPL} | ${SCENARIO} | ${THREADS} 线程 / ${LOOPS} 次循环 | ${STOCK} | ${TOTAL_REQUESTS} | ${throughput} | ${p95_ms} / ${p99_ms} | ${drain_ms} | ${orders} / ${EXPECTED_ORDERS} | ${pending} | ${correctness} | [run-summary](${RUN_SUMMARY_LINK}) |
+EOF
+
+if [[ "$SKIP_HTML" -eq 0 ]]; then
+  if ! jmeter -g "$JTL_FILE" -o "$HTML_REPORT_DIR"; then
+    echo "Warning: failed to generate HTML report at ${HTML_REPORT_DIR}" >&2
+  fi
+fi
+
+cat "$RUN_SUMMARY"

@@ -42,3 +42,4 @@ build/
 /benchmark/*.jtl
 /benchmark/*.log
 /benchmark/report*/
+jmeter.log

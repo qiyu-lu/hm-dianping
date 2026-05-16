@@ -206,31 +206,111 @@ mvn -Dtest=BenchmarkDataTool#resetSeckillBenchmarkData test
 Summary Report 导出文件建议命名：
 
 ```text
-docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-15-seckill-baseline-lua-stream-100t-summary-1.csv
+docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-15-seckill-baseline-lua-stream-100t-1l-summary-r1.csv
 ```
 
 Aggregate Report 导出文件建议命名：
 
 ```text
-docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-15-seckill-baseline-lua-stream-100t-aggregate-1.csv
+docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-15-seckill-baseline-lua-stream-100t-1l-aggregate-r1.csv
 ```
 
 命名规则：
 
 ```text
-YYYY-MM-DD-模块-版本-并发数t-报告类型-轮次.csv
+YYYY-MM-DD-模块-实现版本-并发数t-循环数l-报告类型-r轮次.csv
 ```
 
 例如：
 
 ```text
-2026-05-15-seckill-baseline-lua-stream-100t-aggregate-1.csv
-2026-05-15-seckill-optimized-lua-stream-100t-aggregate-1.csv
+2026-05-15-seckill-baseline-lua-stream-100t-1l-summary-r1.csv
+2026-05-15-seckill-baseline-lua-stream-100t-1l-aggregate-r1.csv
+2026-05-15-seckill-optimized-lua-stream-100t-1l-aggregate-r1.csv
 ```
+
+其中：
+
+- `100t` 表示 100 个 JMeter 线程。
+- `1l` 表示每个线程循环 1 次。
+- `summary` / `aggregate` 表示导出的 JMeter Listener 类型。
+- `r1` 表示同一场景下的第 1 轮压测，重复跑同一场景时递增为 `r2`、`r3`。
 
 每轮导出前要清空 Listener 结果，避免历史运行累计导致 Summary 和 Aggregate 样本数不一致。
 
 ## 命令行运行
+
+### 自动化脚本
+
+推荐使用仓库脚本统一执行压测、导出结果和校验异步落库：
+
+```bash
+scripts/run-seckill-benchmark.sh \
+  --threads 5000 \
+  --loops 5 \
+  --stock 1000 \
+  --user-count 5000 \
+  --voucher-id 11 \
+  --round 1
+```
+
+运行前需要保证后端服务、`hmdp-mysql` 和 `hmdp-redis` 容器已经启动。
+
+脚本默认会使用 `/home/sd101t/.jdks/dragonwell-ex-1.8.0_472` 作为 `JAVA_HOME`。如果终端找不到 `mvn`，脚本会自动尝试 IDEA 内置 Maven：`/opt/idea/plugins/maven/lib/maven3/bin/mvn`。也可以显式指定：
+
+```bash
+scripts/run-seckill-benchmark.sh \
+  --maven-cmd /opt/idea/plugins/maven/lib/maven3/bin/mvn \
+  --java-home /home/sd101t/.jdks/dragonwell-ex-1.8.0_472 \
+  --threads 5000 \
+  --loops 5 \
+  --stock 1000 \
+  --user-count 5000 \
+  --voucher-id 11
+```
+
+脚本会自动完成：
+
+- 使用 `BenchmarkDataTool` 生成测试用户和 Redis token。
+- 重置秒杀券库存、订单、Redis 库存 key、已购集合和 Stream。
+- 通过命令行 JMeter 运行 `docs/Summary Report.jmx`。
+- 生成 JTL 原始文件、HTML Dashboard、Summary CSV 和 Aggregate CSV。
+- JMeter 结束后立即轮询 Docker 中的 MySQL 和 Redis，记录异步落库追平耗时 `drain_ms`。
+- 输出机器可读总表：`docs/JmeterTestSummary/<场景名>/metrics.csv`。
+- 输出单轮证据快照：`docs/JmeterTestSummary/<场景名>/<run_id>-run-summary.md`。
+
+常用参数：
+
+| 参数 | 含义 | 示例 |
+| --- | --- | --- |
+| `--threads` | JMeter 线程数 | `5000` |
+| `--loops` | 每个线程循环次数 | `5` |
+| `--stock` | 本轮重置后的秒杀库存 | `1000` |
+| `--user-count` | 生成的测试用户和 token 数 | `5000` |
+| `--expected-orders` | 预期最终订单数；不传时默认取 `stock`、请求数、用户数的最小值 | `1000` |
+| `--voucher-id` | 指定秒杀券 id | `11` |
+| `--round` | 同一场景的轮次；不传时自动使用当天同场景下一个可用轮次 | `1` |
+| `--maven-cmd` | Maven 可执行文件路径 | `/opt/idea/plugins/maven/lib/maven3/bin/mvn` |
+| `--java-home` | Maven 运行使用的 JDK 路径 | `/home/sd101t/.jdks/dragonwell-ex-1.8.0_472` |
+| `--skip-prepare` | 跳过测试用户和 token 生成 | 适合 token 已经准备好时使用 |
+| `--skip-reset` | 跳过库存、订单和 Redis 重置 | 仅调试脚本时使用 |
+
+输出文件命名示例：
+
+```text
+benchmark/2026-05-16-seckill-baseline-lua-stream-5000t-5l-r1.jtl
+benchmark/report-2026-05-16-seckill-baseline-lua-stream-5000t-5l-r1/
+docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-16-seckill-baseline-lua-stream-5000t-5l-summary-r1.csv
+docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-16-seckill-baseline-lua-stream-5000t-5l-aggregate-r1.csv
+docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-16-seckill-baseline-lua-stream-5000t-5l-r1-run-summary.md
+docs/JmeterTestSummary/seckill-baseline-lua-stream/metrics.csv
+```
+
+`drain_ms` 的含义是：JMeter 进程结束后，到 MySQL 订单数达到预期值且 Redis Stream pending-list 清空之间的耗时。它不等同于接口响应时间，而是衡量异步消费者追平消息积压的指标。
+
+`summary.csv` 和 `aggregate.csv` 是 JMeter 派生结果，保留作原始证据；日常阅读优先看 `metrics.csv`、`run-summary.md` 和 `docs/benchmark-results.md` 的总表。
+
+### 手动命令
 
 冒烟测试：
 
@@ -242,12 +322,12 @@ jmeter -n -t "docs/Summary Report.jmx" -l benchmark/seckill-smoke.jtl
 生成 HTML Dashboard：
 
 ```bash
-rm -rf benchmark/report-2026-05-15-seckill-baseline-lua-stream-100t
+rm -rf benchmark/report-2026-05-15-seckill-baseline-lua-stream-100t-1l-r1
 jmeter -n \
   -t "docs/Summary Report.jmx" \
-  -l benchmark/2026-05-15-seckill-baseline-lua-stream-100t.jtl \
+  -l benchmark/2026-05-15-seckill-baseline-lua-stream-100t-1l-r1.jtl \
   -e \
-  -o benchmark/report-2026-05-15-seckill-baseline-lua-stream-100t
+  -o benchmark/report-2026-05-15-seckill-baseline-lua-stream-100t-1l-r1
 ```
 
 HTML 报告中 `Statistics` 区域的字段：
