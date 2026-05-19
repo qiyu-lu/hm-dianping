@@ -1,5 +1,34 @@
 # 本地环境与常见问题
 
+## MySQL / Redis 容器
+
+当前本机仍复用原黑马点评环境中的 Docker 容器：
+
+```text
+MySQL: hmdp-mysql
+Redis: hmdp-redis
+```
+
+重构后的业务库不是旧的 `hmdp`，而是在同一个 MySQL 容器中的新库：
+
+```text
+local_deals
+```
+
+因此压测脚本在当前本机运行时需要显式传入容器名：
+
+```bash
+scripts/run-seckill-benchmark.sh \
+  --threads 100 \
+  --loops 1 \
+  --stock 100 \
+  --user-count 1000 \
+  --mysql-container hmdp-mysql \
+  --redis-container hmdp-redis
+```
+
+如果后续改用仓库内 `docker-compose.yml` 新建环境，容器名通常会变为 `local-deals-mysql` / `local-deals-redis`，但数据库名仍保持 `local_deals`。
+
 ## 后端接口检查
 
 可以访问下面的接口检查后端是否正常启动：
@@ -47,7 +76,7 @@ Project language level: 8
 路径：
 
 ```text
-File -> Project Structure -> Modules -> hmdp -> Dependencies
+File -> Project Structure -> Modules -> local-deals-service -> Dependencies
 ```
 
 设置：

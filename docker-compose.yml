@@ -3,31 +3,32 @@ version: "3.8"
 services:
   mysql:
     image: mysql:8.0
-    container_name: hmdp-mysql
+    container_name: local-deals-mysql
     restart: always
     ports:
       - "3306:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: local_deals
     volumes:
       - ./mysql-data:/var/lib/mysql
     command:
       --default-authentication-plugin=mysql_native_password
     networks:
-      - hmdp-net
+      - local-deals-net
 
   redis:
     image: redis:6.2
-    container_name: hmdp-redis
+    container_name: local-deals-redis
     restart: always
     ports:
       - "6379:6379"
     volumes:
       - ./redis-data:/data
-    command: redis-server --requirepass redis123
+    command: redis-server --requirepass ${LOCAL_DEALS_REDIS_PASSWORD:?Set LOCAL_DEALS_REDIS_PASSWORD in .env}
     networks:
-      - hmdp-net
+      - local-deals-net
 
 networks:
-  hmdp-net:
+  local-deals-net:
     driver: bridge

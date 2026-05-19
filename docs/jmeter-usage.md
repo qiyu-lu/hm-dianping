@@ -59,7 +59,7 @@ Loop Count = 1
 将 `Test Plan` 命名为：
 
 ```text
-hm-dianping-seckill-benchmark
+local-deals-service-seckill-benchmark
 ```
 
 添加用户变量：
@@ -206,13 +206,13 @@ mvn -Dtest=BenchmarkDataTool#resetSeckillBenchmarkData test
 Summary Report 导出文件建议命名：
 
 ```text
-docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-15-seckill-baseline-lua-stream-100t-1l-summary-r1.csv
+docs/JmeterTestSummary/seckill-reliable-v1/2026-05-19-seckill-reliable-stream-v1-100t-1l-summary-r1.csv
 ```
 
 Aggregate Report 导出文件建议命名：
 
 ```text
-docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-15-seckill-baseline-lua-stream-100t-1l-aggregate-r1.csv
+docs/JmeterTestSummary/seckill-reliable-v1/2026-05-19-seckill-reliable-stream-v1-100t-1l-aggregate-r1.csv
 ```
 
 命名规则：
@@ -224,9 +224,9 @@ YYYY-MM-DD-模块-实现版本-并发数t-循环数l-报告类型-r轮次.csv
 例如：
 
 ```text
-2026-05-15-seckill-baseline-lua-stream-100t-1l-summary-r1.csv
-2026-05-15-seckill-baseline-lua-stream-100t-1l-aggregate-r1.csv
-2026-05-15-seckill-optimized-lua-stream-100t-1l-aggregate-r1.csv
+2026-05-19-seckill-reliable-stream-v1-100t-1l-summary-r1.csv
+2026-05-19-seckill-reliable-stream-v1-100t-1l-aggregate-r1.csv
+2026-05-19-seckill-reliable-stream-v1-5000t-5l-aggregate-r1.csv
 ```
 
 其中：
@@ -245,16 +245,20 @@ YYYY-MM-DD-模块-实现版本-并发数t-循环数l-报告类型-r轮次.csv
 推荐使用仓库脚本统一执行压测、导出结果和校验异步落库：
 
 ```bash
+set -a
+source .env
+set +a
+
 scripts/run-seckill-benchmark.sh \
-  --threads 5000 \
-  --loops 5 \
-  --stock 1000 \
-  --user-count 5000 \
-  --voucher-id 11 \
-  --round 1
+  --threads 100 \
+  --loops 1 \
+  --stock 100 \
+  --user-count 1000 \
+  --mysql-container hmdp-mysql \
+  --redis-container hmdp-redis
 ```
 
-运行前需要保证后端服务、`hmdp-mysql` 和 `hmdp-redis` 容器已经启动。
+运行前需要保证后端服务、MySQL 容器和 Redis 容器已经启动。当前本机复用旧容器名 `hmdp-mysql` / `hmdp-redis`，业务库是 `local_deals`；如果使用 `docker-compose.yml` 新建环境，则容器名通常是 `local-deals-mysql` / `local-deals-redis`。
 
 脚本默认会使用 `/home/sd101t/.jdks/dragonwell-ex-1.8.0_472` 作为 `JAVA_HOME`。如果终端找不到 `mvn`，脚本会自动尝试 IDEA 内置 Maven：`/opt/idea/plugins/maven/lib/maven3/bin/mvn`。也可以显式指定：
 
@@ -266,13 +270,14 @@ scripts/run-seckill-benchmark.sh \
   --loops 5 \
   --stock 1000 \
   --user-count 5000 \
-  --voucher-id 11
+  --mysql-container hmdp-mysql \
+  --redis-container hmdp-redis
 ```
 
 脚本会自动完成：
 
 - 使用 `BenchmarkDataTool` 生成测试用户和 Redis token。
-- 重置秒杀券库存、订单、Redis 库存 key、已购集合和 Stream。
+- 重置秒杀券库存、订单、Redis 库存 key、已购集合、Stream、dead-letter 和重试计数。
 - 通过命令行 JMeter 运行 `docs/Summary Report.jmx`。
 - 生成 JTL 原始文件、HTML Dashboard、Summary CSV 和 Aggregate CSV。
 - JMeter 结束后立即轮询 Docker 中的 MySQL 和 Redis，记录异步落库追平耗时 `drain_ms`。
@@ -288,8 +293,14 @@ scripts/run-seckill-benchmark.sh \
 | `--stock` | 本轮重置后的秒杀库存 | `1000` |
 | `--user-count` | 生成的测试用户和 token 数 | `5000` |
 | `--expected-orders` | 预期最终订单数；不传时默认取 `stock`、请求数、用户数的最小值 | `1000` |
-| `--voucher-id` | 指定秒杀券 id | `11` |
+| `--voucher-id` | 指定秒杀券 id；不传时自动创建或复用 benchmark 秒杀券 | `10` |
 | `--round` | 同一场景的轮次；不传时自动使用当天同场景下一个可用轮次 | `1` |
+| `--stream-key` | Redis Stream key | `stream.orders` |
+| `--stream-group` | Redis Stream consumer group | `g1` |
+| `--dead-letter-key` | Redis dead-letter Stream key | `stream.orders.dlq` |
+| `--mysql-container` | Docker MySQL 容器名 | 当前本机：`hmdp-mysql`；新 compose 环境：`local-deals-mysql` |
+| `--redis-container` | Docker Redis 容器名 | 当前本机：`hmdp-redis`；新 compose 环境：`local-deals-redis` |
+| `--mysql-database` | MySQL 数据库名 | `local_deals` |
 | `--maven-cmd` | Maven 可执行文件路径 | `/opt/idea/plugins/maven/lib/maven3/bin/mvn` |
 | `--java-home` | Maven 运行使用的 JDK 路径 | `/home/sd101t/.jdks/dragonwell-ex-1.8.0_472` |
 | `--skip-prepare` | 跳过测试用户和 token 生成 | 适合 token 已经准备好时使用 |
@@ -298,15 +309,15 @@ scripts/run-seckill-benchmark.sh \
 输出文件命名示例：
 
 ```text
-benchmark/2026-05-16-seckill-baseline-lua-stream-5000t-5l-r1.jtl
-benchmark/report-2026-05-16-seckill-baseline-lua-stream-5000t-5l-r1/
-docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-16-seckill-baseline-lua-stream-5000t-5l-summary-r1.csv
-docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-16-seckill-baseline-lua-stream-5000t-5l-aggregate-r1.csv
-docs/JmeterTestSummary/seckill-baseline-lua-stream/2026-05-16-seckill-baseline-lua-stream-5000t-5l-r1-run-summary.md
-docs/JmeterTestSummary/seckill-baseline-lua-stream/metrics.csv
+benchmark/2026-05-19-seckill-reliable-stream-v1-5000t-5l-r1.jtl
+benchmark/report-2026-05-19-seckill-reliable-stream-v1-5000t-5l-r1/
+docs/JmeterTestSummary/seckill-reliable-v1/2026-05-19-seckill-reliable-stream-v1-5000t-5l-summary-r1.csv
+docs/JmeterTestSummary/seckill-reliable-v1/2026-05-19-seckill-reliable-stream-v1-5000t-5l-aggregate-r1.csv
+docs/JmeterTestSummary/seckill-reliable-v1/2026-05-19-seckill-reliable-stream-v1-5000t-5l-r1-run-summary.md
+docs/JmeterTestSummary/seckill-reliable-v1/metrics.csv
 ```
 
-`drain_ms` 的含义是：JMeter 进程结束后，到 MySQL 订单数达到预期值且 Redis Stream pending-list 清空之间的耗时。它不等同于接口响应时间，而是衡量异步消费者追平消息积压的指标。
+`drain_ms` 的含义是：JMeter 进程结束后，到 MySQL 订单数达到预期值且 Redis Stream pending-list 清空之间的耗时。它不等同于接口响应时间，而是衡量异步消费者追平消息积压的指标。改造版还会校验 `stream.orders.dlq` 长度，dead-letter 非 0 时本轮结果判定为失败。
 
 `summary.csv` 和 `aggregate.csv` 是 JMeter 派生结果，保留作原始证据；日常阅读优先看 `metrics.csv`、`run-summary.md` 和 `docs/benchmark-results.md` 的总表。
 
@@ -322,12 +333,12 @@ jmeter -n -t "docs/Summary Report.jmx" -l benchmark/seckill-smoke.jtl
 生成 HTML Dashboard：
 
 ```bash
-rm -rf benchmark/report-2026-05-15-seckill-baseline-lua-stream-100t-1l-r1
+rm -rf benchmark/report-2026-05-19-seckill-reliable-stream-v1-100t-1l-r1
 jmeter -n \
   -t "docs/Summary Report.jmx" \
-  -l benchmark/2026-05-15-seckill-baseline-lua-stream-100t-1l-r1.jtl \
+  -l benchmark/2026-05-19-seckill-reliable-stream-v1-100t-1l-r1.jtl \
   -e \
-  -o benchmark/report-2026-05-15-seckill-baseline-lua-stream-100t-1l-r1
+  -o benchmark/report-2026-05-19-seckill-reliable-stream-v1-100t-1l-r1
 ```
 
 HTML 报告中 `Statistics` 区域的字段：
@@ -374,10 +385,11 @@ WHERE voucher_id = ${voucherId};
 Redis：
 
 ```bash
-redis-cli -a redis123 GET seckill:stock:${voucherId}
-redis-cli -a redis123 SCARD seckill:order:${voucherId}
-redis-cli -a redis123 XLEN stream.orders
-redis-cli -a redis123 XPENDING stream.orders g1
+redis-cli -a "$LOCAL_DEALS_REDIS_PASSWORD" GET seckill:stock:${voucherId}
+redis-cli -a "$LOCAL_DEALS_REDIS_PASSWORD" SCARD seckill:order:${voucherId}
+redis-cli -a "$LOCAL_DEALS_REDIS_PASSWORD" XLEN stream.orders
+redis-cli -a "$LOCAL_DEALS_REDIS_PASSWORD" XPENDING stream.orders g1
+redis-cli -a "$LOCAL_DEALS_REDIS_PASSWORD" XLEN stream.orders.dlq
 ```
 
 有效基线至少需要满足：
@@ -387,6 +399,7 @@ redis-cli -a redis123 XPENDING stream.orders g1
 - DB 库存不小于 0。
 - Redis 库存与已购集合数量符合预期。
 - Stream pending-list 为 0。
+- Dead-letter Stream 长度为 0。
 
 ## 结果记录
 

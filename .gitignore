@@ -32,6 +32,11 @@ build/
 ### VS Code ###
 .vscode/
 
+### local secrets ###
+.env
+.env.*
+!.env.example
+
 
 ### mysql and ridis data ###
 /mysql-data/

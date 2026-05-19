@@ -6,8 +6,8 @@ cd "$ROOT_DIR"
 
 DATE="$(date +%F)"
 MODULE="seckill"
-IMPL="baseline-lua-stream"
-SCENARIO="seckill-baseline-lua-stream"
+IMPL="reliable-stream-v1"
+SCENARIO="seckill-reliable-v1"
 THREADS=100
 LOOPS=1
 RAMP_UP=5
@@ -22,12 +22,15 @@ TOKENS_FILE="benchmark/tokens.csv"
 JMETER_PLAN="docs/Summary Report.jmx"
 POLL_INTERVAL_MS=50
 DRAIN_TIMEOUT_MS=30000
-MYSQL_CONTAINER="hmdp-mysql"
-REDIS_CONTAINER="hmdp-redis"
-MYSQL_USER="root"
-MYSQL_PASSWORD="root123"
-MYSQL_DATABASE="hmdp"
-REDIS_PASSWORD="redis123"
+MYSQL_CONTAINER="${MYSQL_CONTAINER:-local-deals-mysql}"
+REDIS_CONTAINER="${REDIS_CONTAINER:-local-deals-redis}"
+MYSQL_USER="${MYSQL_USER:-${LOCAL_DEALS_DATASOURCE_USERNAME:-root}}"
+MYSQL_PASSWORD="${MYSQL_PASSWORD:-${LOCAL_DEALS_DATASOURCE_PASSWORD:-}}"
+MYSQL_DATABASE="${MYSQL_DATABASE:-local_deals}"
+REDIS_PASSWORD="${REDIS_PASSWORD:-${LOCAL_DEALS_REDIS_PASSWORD:-}}"
+STREAM_KEY="stream.orders"
+STREAM_GROUP="g1"
+DEAD_LETTER_KEY="stream.orders.dlq"
 JAVA_HOME="${JAVA_HOME:-/home/sd101t/.jdks/dragonwell-ex-1.8.0_472}"
 MAVEN_CMD="${MAVEN_CMD:-}"
 SKIP_PREPARE=0
@@ -51,8 +54,14 @@ Options:
   --host HOST             Target host for JMeter. Default: localhost
   --port PORT             Target port for JMeter. Default: 8083
   --tokens-file PATH      Token CSV path. Default: benchmark/tokens.csv
-  --scenario NAME         Output folder under docs/JmeterTestSummary. Default: seckill-baseline-lua-stream
-  --impl NAME             File-name implementation label. Default: baseline-lua-stream
+  --scenario NAME         Output folder under docs/JmeterTestSummary. Default: seckill-reliable-v1
+  --impl NAME             File-name implementation label. Default: reliable-stream-v1
+  --stream-key KEY        Redis Stream key. Default: stream.orders
+  --stream-group GROUP    Redis Stream consumer group. Default: g1
+  --dead-letter-key KEY   Redis dead-letter Stream key. Default: stream.orders.dlq
+  --mysql-container NAME  Docker MySQL container. Default: local-deals-mysql
+  --redis-container NAME  Docker Redis container. Default: local-deals-redis
+  --mysql-database NAME   MySQL database name. Default: local_deals
   --maven-cmd PATH        Maven executable path. Default: mvn, ./mvnw, or IDEA bundled Maven.
   --java-home PATH        JAVA_HOME for Maven benchmark helpers. Default: Dragonwell JDK 8 in ~/.jdks.
   --poll-ms N             MySQL/Redis polling interval after JMeter exits. Default: 50
@@ -88,6 +97,12 @@ while [[ $# -gt 0 ]]; do
     --tokens-file) TOKENS_FILE="$2"; shift 2 ;;
     --scenario) SCENARIO="$2"; shift 2 ;;
     --impl) IMPL="$2"; shift 2 ;;
+    --stream-key) STREAM_KEY="$2"; shift 2 ;;
+    --stream-group) STREAM_GROUP="$2"; shift 2 ;;
+    --dead-letter-key) DEAD_LETTER_KEY="$2"; shift 2 ;;
+    --mysql-container) MYSQL_CONTAINER="$2"; shift 2 ;;
+    --redis-container) REDIS_CONTAINER="$2"; shift 2 ;;
+    --mysql-database) MYSQL_DATABASE="$2"; shift 2 ;;
     --maven-cmd) MAVEN_CMD="$2"; shift 2 ;;
     --java-home) JAVA_HOME="$2"; shift 2 ;;
     --poll-ms) POLL_INTERVAL_MS="$2"; shift 2 ;;
@@ -110,6 +125,17 @@ require_cmd() {
 require_cmd jmeter
 require_cmd docker
 require_cmd python3
+
+require_secret() {
+  local name="$1"
+  if [[ -z "${!name:-}" ]]; then
+    echo "Missing required environment variable: ${name}. Source .env first, or export it before running this script." >&2
+    exit 1
+  fi
+}
+
+require_secret MYSQL_PASSWORD
+require_secret REDIS_PASSWORD
 
 resolve_maven_cmd() {
   if [[ -n "$MAVEN_CMD" ]]; then
@@ -254,7 +280,7 @@ pending=0
 
 while true; do
   orders="$(mysql_scalar "SELECT COUNT(*) FROM tb_voucher_order WHERE voucher_id = ${VOUCHER_ID};")"
-  pending="$(redis_scalar XPENDING stream.orders g1)"
+  pending="$(redis_scalar XPENDING "$STREAM_KEY" "$STREAM_GROUP")"
   orders="${orders:-0}"
   pending="${pending:-0}"
 
@@ -281,7 +307,8 @@ db_stock="$(mysql_scalar "SELECT stock FROM tb_seckill_voucher WHERE voucher_id 
 duplicate_orders="$(mysql_scalar "SELECT COUNT(*) FROM (SELECT user_id, COUNT(*) AS cnt FROM tb_voucher_order WHERE voucher_id = ${VOUCHER_ID} GROUP BY user_id HAVING cnt > 1) t;")"
 redis_stock="$(redis_scalar GET "seckill:stock:${VOUCHER_ID}")"
 redis_order_count="$(redis_scalar SCARD "seckill:order:${VOUCHER_ID}")"
-stream_len="$(redis_scalar XLEN stream.orders)"
+stream_len="$(redis_scalar XLEN "$STREAM_KEY")"
+dead_letter_len="$(redis_scalar XLEN "$DEAD_LETTER_KEY")"
 RUN_SUMMARY_LINK="${RUN_SUMMARY#docs/}"
 
 python3 - "$JTL_FILE" "$SUMMARY_CSV" "$AGGREGATE_CSV" <<'PY'
@@ -393,11 +420,13 @@ if (( orders != EXPECTED_ORDERS )); then correctness="fail"; fi
 if (( duplicate_orders != 0 )); then correctness="fail"; fi
 if (( db_stock < 0 )); then correctness="fail"; fi
 if [[ "$pending" != "0" ]]; then correctness="fail"; fi
+if [[ "${dead_letter_len:-0}" != "0" ]]; then correctness="fail"; fi
 if [[ "$redis_order_count" != "$EXPECTED_ORDERS" ]]; then correctness="fail"; fi
 if [[ "$redis_stock" != "$expected_redis_stock" ]]; then correctness="fail"; fi
 
 export DATE RUN_ID SCENARIO THREADS LOOPS STOCK USER_COUNT EXPECTED_ORDERS VOUCHER_ID ROUND
 export IMPLEMENTATION="$IMPL"
+export STREAM_KEY STREAM_GROUP DEAD_LETTER_KEY
 export RAMP_UP_SECONDS="$RAMP_UP"
 export TOTAL_REQUESTS="$TOTAL_REQUESTS"
 export SAMPLES="$samples"
@@ -420,6 +449,7 @@ export REDIS_STOCK="$redis_stock"
 export REDIS_ORDER_COUNT="$redis_order_count"
 export STREAM_LEN="$stream_len"
 export STREAM_PENDING="$pending"
+export STREAM_DEAD_LETTERS="${dead_letter_len:-0}"
 export CORRECTNESS="$correctness"
 export RUN_SUMMARY="$RUN_SUMMARY"
 export JTL_FILE="$JTL_FILE"
@@ -440,7 +470,8 @@ fields = [
     "avg_ms", "median_ms", "p90_ms", "p95_ms", "p99_ms", "min_ms",
     "max_ms", "error_pct", "jmeter_elapsed_ms", "drain_ms",
     "poll_interval_ms", "mysql_orders", "mysql_stock", "duplicate_orders",
-    "redis_stock", "redis_order_count", "stream_len", "stream_pending",
+    "redis_stock", "redis_order_count", "stream_key", "stream_group",
+    "stream_len", "stream_pending", "dead_letter_key", "stream_dead_letters",
     "correctness", "run_summary", "jtl_file", "summary_csv",
     "aggregate_csv", "html_report",
 ]
@@ -465,6 +496,9 @@ cat > "$RUN_SUMMARY" <<EOF
 - scenario: ${SCENARIO}
 - implementation: ${IMPL}
 - voucher_id: ${VOUCHER_ID}
+- stream_key: ${STREAM_KEY}
+- stream_group: ${STREAM_GROUP}
+- dead_letter_key: ${DEAD_LETTER_KEY}
 - stock: ${STOCK}
 - expected_orders: ${EXPECTED_ORDERS}
 - threads: ${THREADS}
@@ -492,6 +526,7 @@ cat > "$RUN_SUMMARY" <<EOF
 - redis_order_count: ${redis_order_count}
 - stream_len: ${stream_len}
 - stream_pending: ${pending}
+- stream_dead_letters: ${dead_letter_len:-0}
 - correctness: ${correctness}
 - metrics_csv: ${METRICS_CSV}
 - jtl_file: ${JTL_FILE}
@@ -501,7 +536,7 @@ cat > "$RUN_SUMMARY" <<EOF
 
 ## Markdown Row
 
-| ${DATE} | ${IMPL} | ${SCENARIO} | ${THREADS} 线程 / ${LOOPS} 次循环 | ${STOCK} | ${TOTAL_REQUESTS} | ${throughput} | ${p95_ms} / ${p99_ms} | ${drain_ms} | ${orders} / ${EXPECTED_ORDERS} | ${pending} | ${correctness} | [run-summary](${RUN_SUMMARY_LINK}) |
+| ${DATE} | ${IMPL} | ${SCENARIO} | ${THREADS} 线程 / ${LOOPS} 次循环 | ${STOCK} | ${TOTAL_REQUESTS} | ${throughput} | ${p95_ms} / ${p99_ms} | ${drain_ms} | ${orders} / ${EXPECTED_ORDERS} | ${pending} | ${dead_letter_len:-0} | ${correctness} | [run-summary](${RUN_SUMMARY_LINK}) |
 EOF
 
 if [[ "$SKIP_HTML" -eq 0 ]]; then

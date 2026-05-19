@@ -14,6 +14,7 @@
 - 是否超卖
 - 是否重复下单
 - Redis Stream 是否存在未处理 pending 消息
+- Redis dead-letter Stream 是否为空
 
 ## 压测数据原则
 
@@ -21,7 +22,7 @@
 - 不新增公开的免验证码登录接口。
 - 压测用户使用固定手机号前缀，默认 `1990000xxxx`。
 - 压测 token 使用固定格式，默认 `bench-token-{userId}`。
-- 每轮压测前必须重置订单、库存、Redis 秒杀 key 和 Stream。
+- 每轮压测前必须重置订单、库存、Redis 秒杀 key、Stream、dead-letter 和重试计数。
 
 ## 准备测试用户和 token
 
@@ -88,7 +89,8 @@ mvn \
 - 更新 `tb_seckill_voucher.stock`。
 - 写入 `seckill:stock:{voucherId}`。
 - 删除 `seckill:order:{voucherId}`。
-- 重建 `stream.orders` 和消费者组 `g1`。
+- 删除 `stream.orders`、`stream.orders.dlq` 和 `seckill:stream:retry:*`。
+- 通过 `XGROUP CREATE ... MKSTREAM` 重建 `stream.orders` 和消费者组 `g1`，不再写入虚拟 init 消息。
 
 ## JMeter 配置
 
@@ -123,6 +125,44 @@ POST http://localhost:8083/voucher-order/seckill/{voucherId}
 ```
 
 ## 命令行运行
+
+推荐使用自动化脚本，默认将结果归档到 `seckill-reliable-v1` 场景。当前本机复用旧容器 `hmdp-mysql` / `hmdp-redis`，但业务库已经迁移为 `local_deals`，所以需要显式传入容器名：
+
+```bash
+scripts/run-seckill-benchmark.sh \
+  --threads 100 \
+  --loops 1 \
+  --stock 100 \
+  --user-count 1000 \
+  --mysql-container hmdp-mysql \
+  --redis-container hmdp-redis
+```
+
+可靠性增强版已验证的 4 组命令：
+
+```bash
+scripts/run-seckill-benchmark.sh --threads 100 --loops 1 --stock 100 --user-count 1000 --mysql-container hmdp-mysql --redis-container hmdp-redis
+scripts/run-seckill-benchmark.sh --threads 1000 --loops 1 --stock 1000 --user-count 2000 --mysql-container hmdp-mysql --redis-container hmdp-redis
+scripts/run-seckill-benchmark.sh --threads 5000 --loops 1 --stock 1000 --user-count 5000 --mysql-container hmdp-mysql --redis-container hmdp-redis
+scripts/run-seckill-benchmark.sh --threads 5000 --loops 5 --stock 1000 --user-count 5000 --mysql-container hmdp-mysql --redis-container hmdp-redis
+```
+
+不传 `--voucher-id` 时，脚本会通过 `BenchmarkDataTool` 自动创建或复用本地压测秒杀券，避免依赖旧库里的固定券 id。
+
+如果需要复跑旧基线，可以显式传入：
+
+```bash
+scripts/run-seckill-benchmark.sh \
+  --scenario seckill-baseline-lua-stream \
+  --impl baseline-lua-stream \
+  --threads 5000 \
+  --loops 5 \
+  --stock 1000 \
+  --user-count 5000 \
+  --voucher-id 11
+```
+
+旧基线命令只适合 `baseline-video-version` 或历史库状态可用时使用；当前主线推荐使用 `local_deals` 库和自动创建的 benchmark 秒杀券。
 
 冒烟测试：
 
@@ -171,7 +211,13 @@ WHERE voucher_id = ${voucherId};
 Redis Stream pending-list 检查：
 
 ```bash
-redis-cli -a redis123 XPENDING stream.orders g1
+redis-cli -a "$LOCAL_DEALS_REDIS_PASSWORD" XPENDING stream.orders g1
+```
+
+Redis dead-letter 检查：
+
+```bash
+redis-cli -a "$LOCAL_DEALS_REDIS_PASSWORD" XLEN stream.orders.dlq
 ```
 
 ## 清理压测用户

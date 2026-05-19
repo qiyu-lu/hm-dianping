@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
   <hashTree>
-    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="hm-dianping-seckill-benchmark">
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="local-deals-seckill-benchmark">
       <stringProp name="TestPlan.comments">秒杀接口压测，token 从 benchmark/tokens.csv 读取</stringProp>
       <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
         <collectionProp name="Arguments.arguments"/>
@@ -44,7 +44,7 @@
         <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="CSV Data Set Config" enabled="true">
           <stringProp name="delimiter">,</stringProp>
           <stringProp name="fileEncoding">UTF-8</stringProp>
-          <stringProp name="filename">${__P(tokensFile,/home/sd101t/IdeaProjects/hm-dianping/benchmark/tokens.csv)}</stringProp>
+          <stringProp name="filename">${__P(tokensFile,benchmark/tokens.csv)}</stringProp>
           <boolProp name="ignoreFirstLine">false</boolProp>
           <boolProp name="quotedData">false</boolProp>
           <boolProp name="recycle">true</boolProp>

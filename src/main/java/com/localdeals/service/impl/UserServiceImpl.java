@@ -1,0 +1,199 @@
+package com.localdeals.service.impl;
+
+import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.bean.copier.CopyOptions;
+import cn.hutool.core.lang.UUID;
+import cn.hutool.core.util.RandomUtil;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.localdeals.dto.LoginFormDTO;
+import com.localdeals.dto.Result;
+import com.localdeals.dto.UserDTO;
+import com.localdeals.entity.User;
+import com.localdeals.mapper.UserMapper;
+import com.localdeals.service.IUserService;
+import com.localdeals.utils.UserHolder;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.connection.BitFieldSubCommands;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Service;
+
+import javax.servlet.http.HttpSession;
+
+import java.time.LocalDateTime;
+
+import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+import static com.localdeals.utils.RedisConstants.*;
+import static com.localdeals.utils.RegexUtils.isPhoneInvalid;
+import static com.localdeals.utils.SystemConstants.USER_NICK_NAME_PREFIX;
+
+/**
+ * <p>
+ * 服务实现类
+ * </p>
+ *
+ * @author 虎哥
+ * @since 2021-12-22
+ */
+@Slf4j
+@Service
+public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IUserService {
+    @Autowired
+    private HttpSession session;
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Override
+    public Result sendCode(String phone, HttpSession session){
+        // 1 号码校验
+        if(isPhoneInvalid(phone)){//校验传入的电话号码，通过工具类中的方法
+            return Result.fail("号码不合法");
+        }
+        // 生成验证码 这里是使用随机数方法生成一个6位数的验证码
+        String code = RandomUtil.randomNumbers(6);
+
+        //存入session  将验证码存入传入的session中
+        //session.setAttribute("code", code);
+        //这里不是选择将验证码存入session中，而是选择存入redis中
+        String codeKey = LOGIN_CODE_KEY + phone;
+        stringRedisTemplate.opsForValue().set(codeKey, code, LOGIN_CODE_TTL, TimeUnit.MINUTES);
+
+        //打印或者发送短信
+        log.debug("验证码是：" + code);
+        return Result.ok();
+    }
+    @Override
+    public Result login(LoginFormDTO loginForm, HttpSession session){
+        // 号码校验
+        String phone = loginForm.getPhone();
+        if(isPhoneInvalid(phone)){//校验传入的手机号码
+            return Result.fail("号码不合法");
+        }
+        // 取出验证码 用户输入的验证吗
+        String rawCode = loginForm.getCode();
+        //和之前发送的验证码进行比较
+
+        //从redis中取出验证码
+        if(rawCode ==null || !rawCode.equals(stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone))){
+            return Result.fail("验证码不正确");
+        }
+        //根据号码查询用户，如果存在返回用户，不存在新建用户
+        User user = lambdaQuery()
+                .eq(User::getPhone, phone)
+                .one();
+        if(user == null){//如果用户不存在，查询不到，那么就创建新用户，进行保存
+            log.debug("短信登陆用户不存在");
+            user = generateUserWithphone(phone);
+            log.debug("新建的用户：{}", user);
+            save(user);
+        }
+        log.debug("用户存在：{}", user);
+        UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);//复制不隐私的信息，不过我认为这里应该使用vo
+
+        String token = UUID.randomUUID().toString(true);
+        //Bean → Map（去掉敏感字段）Redis Hash 不支持存复杂对象，需要转成 String
+        //把 UserDTO 对象转换成一个 Map<String, String>（Redis Hash 需要 String）
+        Map<String, Object> userMap = BeanUtil.beanToMap(userDTO,
+                new HashMap<>(),//这是目标 Map，也就是 beanToMap 输出的容器
+                CopyOptions.create()//这是 Hutool 提供的“拷贝配置对象”，后面两个链式方法就是重点
+                        .setIgnoreNullValue(true)//忽略所有 null 字段，不放到 Map 中
+                        //把每个字段的值强制转成 String
+                        .setFieldValueEditor((fieldName, fieldValue) -> fieldValue.toString())
+        );
+        //写入 Redis（Hash 类型）+ 设置 TTL
+        String tokenKey = LOGIN_USER_KEY + token;
+        stringRedisTemplate.opsForHash().putAll(tokenKey, userMap);
+        stringRedisTemplate.expire(tokenKey, 30, TimeUnit.MINUTES);// 设置有效期（30 分钟）
+        log.debug("存入redis中的token：{}", tokenKey);
+        //返回token到前端
+        return Result.ok(token);
+    }
+
+    private User generateUserWithphone(String phone){
+        User user = new User();
+        user.setPhone(phone);
+        user.setNickName(USER_NICK_NAME_PREFIX + RandomUtil.randomString(10));
+        user.setCreateTime(LocalDateTime.now());
+        user.setUpdateTime(LocalDateTime.now());
+        return user;
+    }
+
+    @Override
+    public Result me(){
+        return Result.ok(UserHolder.getUser());
+    }
+
+    @Override
+    public Result logout(String token) {
+        // 直接从 Redis 中删除用户信息
+        stringRedisTemplate.delete(LOGIN_USER_KEY + token);
+        // 无需操作 UserHolder，因为拦截器的 afterCompletion 会统一清理
+        return Result.ok();
+    }
+
+    @Override
+    public Result sign() {
+        //获取当前登录用户
+        Long userId = UserHolder.getUser().getId();
+        //获取日期
+        LocalDateTime now = LocalDateTime.now();
+        //拼接key
+        String keySuffix = now.format(DateTimeFormatter.ofPattern(":yyyyMM"));
+        String key = USER_SIGN_KEY + userId + keySuffix;
+        //获取今天是本月的第几天，来设置第几位的状态
+        int dayOfMonth = now.getDayOfMonth();
+        //写入reids
+        stringRedisTemplate.opsForValue().setBit(key, dayOfMonth - 1, true);
+        return Result.ok();
+    }
+
+    @Override
+    public Result signCount() {
+        //获取当前登录用户
+        Long userId = UserHolder.getUser().getId();
+        //获取日期
+        LocalDateTime now = LocalDateTime.now();
+        //拼接key
+        String keySuffix = now.format(DateTimeFormatter.ofPattern(":yyyyMM"));
+        String key = USER_SIGN_KEY + userId + keySuffix;
+        //获取今天是本月的第几天，来设置第几位的状态
+        int dayOfMonth = now.getDayOfMonth();
+        //获取本月截止今天为止的所有签到记录
+        List<Long> result = stringRedisTemplate.opsForValue()
+                .bitField(
+                        key,
+                        BitFieldSubCommands.create()
+                                .get(BitFieldSubCommands.BitFieldType
+                                        .unsigned(dayOfMonth)).valueAt(0)
+                );
+        if(result == null || result.isEmpty()){
+            return Result.ok(0);
+        }
+        Long num = result.get(0);
+        if(num == null || num == 0){
+            return Result.ok(0);
+        }
+        //循环遍历
+        int count = 0;
+        while(true){
+            //让这个数字与1做与运算，得到最后一位的bit位
+            //判断最后一位是否为0
+            //如果为0，未签到，结束
+            //不为0，已经签到继续，计数器加 1
+            //右移继续判断
+            if((num & 1) == 0){
+                break;
+            }
+            else{
+                count++;
+            }
+            num = num >>> 1;
+        }
+        return Result.ok(count);
+    }
+}
