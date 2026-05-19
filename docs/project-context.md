@@ -5,21 +5,23 @@
 ## 当前快照
 
 - 当前分支：`main`
-- 最新已推送提交：`511baa6 Automate seckill benchmark reporting`
+- 最新已推送提交：`a9ae77a Repackage local deals seckill reliability`
 - 冻结原始基线分支：`baseline-video-version`
-- 当前本地阶段：已从教程原型重塑为 `local-deals-service`，并完成秒杀异步下单可靠性增强的第一版代码实现。
+- 当前本地阶段：已从教程原型重塑为 `local-deals-service`，并完成秒杀异步下单可靠性增强的第一版代码实现和文档包装。
 - 当前专题：秒杀链路生产化改造、可观测性和压测对比已形成第一版证据。
 - 当前实现版本标签：`reliable-stream-v1`
+- 当前停止点：今天暂不继续新增代码；故障注入 / dead-letter 闭环验证先作为下一阶段待讨论方案保留。
 - 本机仓库路径仍是：`/home/sd101t/IdeaProjects/hm-dianping`
 
 ## 下一步计划
 
-优先整理“秒杀异步下单可靠性增强”的对外展示和后续补充验证。
+下次恢复时先确认是否继续做“异常闭环验证”，不要直接开始大改。
 
-1. 将 `README.md`、`docs/benchmark-results.md`、`docs/benchmark-plan.md` 和 `docs/jmeter-usage.md` 保持为当前公开展示入口。
-2. 如需继续增强说服力，补一轮故障注入验证：模拟消费失败，确认 pending 重试上限和 `stream.orders.dlq` 行为。
-3. 启动后端后检查 `/actuator/prometheus` 中的秒杀指标，必要时补充 Prometheus 指标截图或指标样例。
-4. 后续如果新建 `local-deals-mysql` / `local-deals-redis` 容器，再决定是否把脚本默认容器名从旧的 `hmdp-*` 迁移到 `local-deals-*`。
+1. 先读取本文档、`git status -sb` 和 `git log -5 --oneline --decorate`，确认仍停在 `a9ae77a` 之后。
+2. 如果继续补证据，优先做故障注入验证：通过测试侧工具向 `stream.orders` 写入缺字段消息，触发消费者异常重试，最终验证 `XPENDING stream.orders g1 == 0` 且 `XLEN stream.orders.dlq == 1`。
+3. 故障注入方案原则：不新增生产调试 HTTP 接口；使用 `BenchmarkDataTool` + 独立脚本生成 repo 内证据文件，例如 `docs/reliability-results.md`。
+4. 如果暂时不写代码，可以先补 Prometheus 指标样例、README 面试讲法，或把当前项目改造压缩成简历/面试版表述。
+5. 后续如果新建 `local-deals-mysql` / `local-deals-redis` 容器，再决定是否把脚本默认容器名从旧的 `hmdp-*` 迁移到 `local-deals-*`。
 
 ## 最近更新
 
@@ -27,6 +29,12 @@
 
 ### 2026-05-19
 
+- 本次收尾决策：今天暂不继续新增代码，停止在已推送的 `a9ae77a Repackage local deals seckill reliability` 之后；原计划中的故障注入脚本和 `docs/reliability-results.md` 尚未实现。
+- 当前本地环境结论：新业务库 `local_deals` 是直接建在旧 Docker 容器 `hmdp-mysql` 中，Redis 仍使用 `hmdp-redis`；当前阶段不需要额外新建 MySQL/Redis 容器。
+- 当前压测命令仍建议显式传入 `--mysql-container hmdp-mysql --redis-container hmdp-redis`，否则脚本默认的 `local-deals-*` 容器名可能和本机环境不一致。
+- 对当前改进完备性的判断：已经可以作为第一版可靠性改造展示，但还不是“完备的生产化秒杀项目”。当前结果主要证明正确性、幂等兜底、异步消费可靠性和压测自动化；性能提升不是主要卖点。
+- 当前主要短板：缺少消费失败场景证据、Prometheus 指标样例/截图、订单状态补偿闭环、CI/一键演示，以及和原黑马点评教程版更强的产品化差异说明。
+- 下次如果继续实现，推荐优先做“异常闭环验证”：测试侧注入缺少 `orderId` 的 Redis Stream 消息，确认 pending 重试上限生效并进入 `stream.orders.dlq`，再把结果写入文档。
 - 使用当前本机旧 Docker 容器 `hmdp-mysql` / `hmdp-redis` 和新业务库 `local_deals` 跑通 `reliable-stream-v1` 四组压测。
 - `reliable-stream-v1` 结果已写入 `docs/JmeterTestSummary/seckill-reliable-v1/` 和 `docs/benchmark-results.md`：100、1000、5000、25000 请求四组均 `pass`，pending 为 0，dead-letter 为 0，`drain_ms` 为 72-80 ms。
 - 当前压测命令需要显式传入 `--mysql-container hmdp-mysql --redis-container hmdp-redis`；不传 `--voucher-id`，由工具自动创建或复用 `local_deals` 中的 benchmark 秒杀券。
@@ -117,7 +125,8 @@ scripts/run-seckill-benchmark.sh --threads 5000 --loops 5 --stock 1000 --user-co
 ```text
 请先阅读 /home/sd101t/IdeaProjects/hm-dianping/docs/project-context.md，
 再结合当前专题中列出的关键文件恢复 local-deals-service 项目上下文。
-当前 reliable-stream-v1 已完成四组压测并写入 docs/benchmark-results.md。
-后续重点是整理对外展示、补充 Prometheus 指标确认，或做 pending 重试/dead-letter 的故障注入验证。
+当前 main/origin/main 最新提交应为 a9ae77a Repackage local deals seckill reliability。
+当前 reliable-stream-v1 已完成四组压测并写入 docs/benchmark-results.md，但故障注入 / dead-letter 闭环验证尚未实现。
+后续如果继续开发，先讨论是否按测试侧注入 Redis Stream 异常消息的方案补 docs/reliability-results.md。
 当前本机压测命令需要显式传入 --mysql-container hmdp-mysql --redis-container hmdp-redis。
 ```
