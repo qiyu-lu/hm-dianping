@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_DIR="$SCRIPT_ROOT"
+OUTPUT_ROOT="$SCRIPT_ROOT"
 
 DATE="$(date +%F)"
 MODULE="seckill"
@@ -54,8 +55,11 @@ Options:
   --host HOST             Target host for JMeter. Default: localhost
   --port PORT             Target port for JMeter. Default: 8083
   --tokens-file PATH      Token CSV path. Default: benchmark/tokens.csv
+  --jmeter-plan PATH      JMeter plan path. Default: docs/Summary Report.jmx in project-dir.
   --scenario NAME         Output folder under docs/JmeterTestSummary. Default: seckill-reliable-v1
   --impl NAME             File-name implementation label. Default: reliable-stream-v1
+  --project-dir PATH      Project checkout to run Maven/JMeter from. Default: this repo.
+  --output-root PATH      Repo root where benchmark artifacts are written. Default: this repo.
   --stream-key KEY        Redis Stream key. Default: stream.orders
   --stream-group GROUP    Redis Stream consumer group. Default: g1
   --dead-letter-key KEY   Redis dead-letter Stream key. Default: stream.orders.dlq
@@ -95,8 +99,11 @@ while [[ $# -gt 0 ]]; do
     --host) HOST="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --tokens-file) TOKENS_FILE="$2"; shift 2 ;;
+    --jmeter-plan) JMETER_PLAN="$2"; shift 2 ;;
     --scenario) SCENARIO="$2"; shift 2 ;;
     --impl) IMPL="$2"; shift 2 ;;
+    --project-dir) PROJECT_DIR="$2"; shift 2 ;;
+    --output-root) OUTPUT_ROOT="$2"; shift 2 ;;
     --stream-key) STREAM_KEY="$2"; shift 2 ;;
     --stream-group) STREAM_GROUP="$2"; shift 2 ;;
     --dead-letter-key) DEAD_LETTER_KEY="$2"; shift 2 ;;
@@ -114,6 +121,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
+
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+mkdir -p "$OUTPUT_ROOT"
+OUTPUT_ROOT="$(cd "$OUTPUT_ROOT" && pwd)"
+cd "$PROJECT_DIR"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -181,8 +193,10 @@ if [[ -z "$EXPECTED_ORDERS" ]]; then
   fi
 fi
 
-RESULT_DIR="docs/JmeterTestSummary/${SCENARIO}"
-BENCHMARK_DIR="benchmark"
+RESULT_DIR_REL="docs/JmeterTestSummary/${SCENARIO}"
+BENCHMARK_DIR_REL="benchmark"
+RESULT_DIR="${OUTPUT_ROOT}/${RESULT_DIR_REL}"
+BENCHMARK_DIR="${OUTPUT_ROOT}/${BENCHMARK_DIR_REL}"
 RUN_ID_PREFIX="${DATE}-${MODULE}-${IMPL}-${THREADS}t-${LOOPS}l"
 if [[ -z "$ROUND" ]]; then
   ROUND=1
@@ -193,12 +207,28 @@ if [[ -z "$ROUND" ]]; then
   done
 fi
 RUN_ID="${RUN_ID_PREFIX}-r${ROUND}"
-SUMMARY_CSV="${RESULT_DIR}/${RUN_ID_PREFIX}-summary-r${ROUND}.csv"
-AGGREGATE_CSV="${RESULT_DIR}/${RUN_ID_PREFIX}-aggregate-r${ROUND}.csv"
-METRICS_CSV="${RESULT_DIR}/metrics.csv"
-JTL_FILE="${BENCHMARK_DIR}/${RUN_ID}.jtl"
-HTML_REPORT_DIR="${BENCHMARK_DIR}/report-${RUN_ID}"
-RUN_SUMMARY="${RESULT_DIR}/${RUN_ID}-run-summary.md"
+SUMMARY_CSV_REL="${RESULT_DIR_REL}/${RUN_ID_PREFIX}-summary-r${ROUND}.csv"
+AGGREGATE_CSV_REL="${RESULT_DIR_REL}/${RUN_ID_PREFIX}-aggregate-r${ROUND}.csv"
+METRICS_CSV_REL="${RESULT_DIR_REL}/metrics.csv"
+JTL_FILE_REL="${BENCHMARK_DIR_REL}/${RUN_ID}.jtl"
+HTML_REPORT_DIR_REL="${BENCHMARK_DIR_REL}/report-${RUN_ID}"
+RUN_SUMMARY_REL="${RESULT_DIR_REL}/${RUN_ID}-run-summary.md"
+SUMMARY_CSV="${OUTPUT_ROOT}/${SUMMARY_CSV_REL}"
+AGGREGATE_CSV="${OUTPUT_ROOT}/${AGGREGATE_CSV_REL}"
+METRICS_CSV="${OUTPUT_ROOT}/${METRICS_CSV_REL}"
+JTL_FILE="${OUTPUT_ROOT}/${JTL_FILE_REL}"
+HTML_REPORT_DIR="${OUTPUT_ROOT}/${HTML_REPORT_DIR_REL}"
+RUN_SUMMARY="${OUTPUT_ROOT}/${RUN_SUMMARY_REL}"
+if [[ "$TOKENS_FILE" = /* ]]; then
+  TOKENS_FILE_ABS="$TOKENS_FILE"
+else
+  TOKENS_FILE_ABS="${PROJECT_DIR}/${TOKENS_FILE}"
+fi
+if [[ "$JMETER_PLAN" = /* ]]; then
+  JMETER_PLAN_ABS="$JMETER_PLAN"
+else
+  JMETER_PLAN_ABS="${PROJECT_DIR}/${JMETER_PLAN}"
+fi
 
 mkdir -p "$RESULT_DIR" "$BENCHMARK_DIR"
 
@@ -237,6 +267,14 @@ if [[ -z "$VOUCHER_ID" ]]; then
   exit 1
 fi
 
+docker exec "$REDIS_CONTAINER" redis-cli -a "$REDIS_PASSWORD" DEL "$DEAD_LETTER_KEY" >/dev/null 2>&1 || true
+retry_keys="$(docker exec "$REDIS_CONTAINER" redis-cli -a "$REDIS_PASSWORD" --raw KEYS 'seckill:stream:retry:*' 2>/dev/null || true)"
+if [[ -n "$retry_keys" ]]; then
+  while IFS= read -r key; do
+    [[ -n "$key" ]] && docker exec "$REDIS_CONTAINER" redis-cli -a "$REDIS_PASSWORD" DEL "$key" >/dev/null 2>&1 || true
+  done <<< "$retry_keys"
+fi
+
 rm -f "$JTL_FILE" "$SUMMARY_CSV" "$AGGREGATE_CSV"
 if [[ "$SKIP_HTML" -eq 0 ]]; then
   rm -rf "$HTML_REPORT_DIR"
@@ -245,7 +283,7 @@ fi
 jmeter_cmd=(
   jmeter
   -n
-  -t "$JMETER_PLAN"
+  -t "$JMETER_PLAN_ABS"
   -l "$JTL_FILE"
   -Jhost="$HOST"
   -Jport="$PORT"
@@ -253,7 +291,7 @@ jmeter_cmd=(
   -Jthreads="$THREADS"
   -JrampUp="$RAMP_UP"
   -Jloops="$LOOPS"
-  -JtokensFile="$ROOT_DIR/$TOKENS_FILE"
+  -JtokensFile="$TOKENS_FILE_ABS"
   -Jjmeter.save.saveservice.output_format=csv
   -Jjmeter.save.saveservice.print_field_names=true
   -Jjmeter.save.saveservice.timestamp_format=ms
@@ -309,7 +347,7 @@ redis_stock="$(redis_scalar GET "seckill:stock:${VOUCHER_ID}")"
 redis_order_count="$(redis_scalar SCARD "seckill:order:${VOUCHER_ID}")"
 stream_len="$(redis_scalar XLEN "$STREAM_KEY")"
 dead_letter_len="$(redis_scalar XLEN "$DEAD_LETTER_KEY")"
-RUN_SUMMARY_LINK="${RUN_SUMMARY#docs/}"
+RUN_SUMMARY_LINK="${RUN_SUMMARY_REL#docs/}"
 
 python3 - "$JTL_FILE" "$SUMMARY_CSV" "$AGGREGATE_CSV" <<'PY'
 import csv
@@ -451,11 +489,11 @@ export STREAM_LEN="$stream_len"
 export STREAM_PENDING="$pending"
 export STREAM_DEAD_LETTERS="${dead_letter_len:-0}"
 export CORRECTNESS="$correctness"
-export RUN_SUMMARY="$RUN_SUMMARY"
-export JTL_FILE="$JTL_FILE"
-export SUMMARY_CSV="$SUMMARY_CSV"
-export AGGREGATE_CSV="$AGGREGATE_CSV"
-export HTML_REPORT="$([[ "$SKIP_HTML" -eq 0 ]] && printf '%s' "${HTML_REPORT_DIR}" || printf 'skipped')"
+export METRIC_RUN_SUMMARY="$RUN_SUMMARY_REL"
+export METRIC_JTL_FILE="$JTL_FILE_REL"
+export METRIC_SUMMARY_CSV="$SUMMARY_CSV_REL"
+export METRIC_AGGREGATE_CSV="$AGGREGATE_CSV_REL"
+export METRIC_HTML_REPORT="$([[ "$SKIP_HTML" -eq 0 ]] && printf '%s' "${HTML_REPORT_DIR_REL}" || printf 'skipped')"
 
 python3 - "$METRICS_CSV" <<'PY'
 import csv
@@ -476,6 +514,11 @@ fields = [
     "aggregate_csv", "html_report",
 ]
 row = {field: os.environ.get(field.upper(), "") for field in fields}
+row["run_summary"] = os.environ.get("METRIC_RUN_SUMMARY", "")
+row["jtl_file"] = os.environ.get("METRIC_JTL_FILE", "")
+row["summary_csv"] = os.environ.get("METRIC_SUMMARY_CSV", "")
+row["aggregate_csv"] = os.environ.get("METRIC_AGGREGATE_CSV", "")
+row["html_report"] = os.environ.get("METRIC_HTML_REPORT", "")
 existing = []
 if os.path.exists(path) and os.path.getsize(path) > 0:
     with open(path, newline="", encoding="utf-8") as f:
@@ -519,6 +562,11 @@ cat > "$RUN_SUMMARY" <<EOF
 - poll_interval_ms: ${POLL_INTERVAL_MS}
 - java_home: ${JAVA_HOME}
 - maven_cmd: ${MAVEN_CMD}
+- project_dir: ${PROJECT_DIR}
+- output_root: ${OUTPUT_ROOT}
+- mysql_container: ${MYSQL_CONTAINER}
+- mysql_database: ${MYSQL_DATABASE}
+- redis_container: ${REDIS_CONTAINER}
 - mysql_orders: ${orders}
 - mysql_stock: ${db_stock}
 - duplicate_orders: ${duplicate_orders}
@@ -528,11 +576,11 @@ cat > "$RUN_SUMMARY" <<EOF
 - stream_pending: ${pending}
 - stream_dead_letters: ${dead_letter_len:-0}
 - correctness: ${correctness}
-- metrics_csv: ${METRICS_CSV}
-- jtl_file: ${JTL_FILE}
-- summary_csv: ${SUMMARY_CSV}
-- aggregate_csv: ${AGGREGATE_CSV}
-- html_report: $([[ "$SKIP_HTML" -eq 0 ]] && printf '%s' "${HTML_REPORT_DIR}" || printf 'skipped')
+- metrics_csv: ${METRICS_CSV_REL}
+- jtl_file: ${JTL_FILE_REL}
+- summary_csv: ${SUMMARY_CSV_REL}
+- aggregate_csv: ${AGGREGATE_CSV_REL}
+- html_report: $([[ "$SKIP_HTML" -eq 0 ]] && printf '%s' "${HTML_REPORT_DIR_REL}" || printf 'skipped')
 
 ## Markdown Row
 

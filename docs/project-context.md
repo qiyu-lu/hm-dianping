@@ -5,27 +5,42 @@
 ## 当前快照
 
 - 当前分支：`main`
-- 最新已推送提交：`a9ae77a Repackage local deals seckill reliability`
+- 最新已推送提交：`b4572fe update project-context.md`
 - 冻结原始基线分支：`baseline-video-version`
 - 当前本地阶段：已从教程原型重塑为 `local-deals-service`，并完成秒杀异步下单可靠性增强的第一版代码实现和文档包装。
-- 当前专题：秒杀链路生产化改造、可观测性和压测对比已形成第一版证据。
+- 当前专题：秒杀链路生产化改造、可观测性、正常压测对比和故障注入验证已形成第一版证据。
 - 当前实现版本标签：`reliable-stream-v1`
-- 当前停止点：今天暂不继续新增代码；故障注入 / dead-letter 闭环验证先作为下一阶段待讨论方案保留。
+- 当前停止点：baseline 与 `reliable-stream-v1` 的 2026-05-20 对比验证已补齐；若聊天上下文丢失，先读 `docs/seckill-comparison-test-runbook.md`、`docs/benchmark-results.md` 和 `docs/reliability-results.md`。
 - 本机仓库路径仍是：`/home/sd101t/IdeaProjects/hm-dianping`
 
 ## 下一步计划
 
-下次恢复时先确认是否继续做“异常闭环验证”，不要直接开始大改。
+下次恢复时先确认是否继续做“文档包装 / README 面试讲法 / 新专题优化”，不要重复跑已经有效的 2026-05-20 对比证据。
 
-1. 先读取本文档、`git status -sb` 和 `git log -5 --oneline --decorate`，确认仍停在 `a9ae77a` 之后。
-2. 如果继续补证据，优先做故障注入验证：通过测试侧工具向 `stream.orders` 写入缺字段消息，触发消费者异常重试，最终验证 `XPENDING stream.orders g1 == 0` 且 `XLEN stream.orders.dlq == 1`。
-3. 故障注入方案原则：不新增生产调试 HTTP 接口；使用 `BenchmarkDataTool` + 独立脚本生成 repo 内证据文件，例如 `docs/reliability-results.md`。
-4. 如果暂时不写代码，可以先补 Prometheus 指标样例、README 面试讲法，或把当前项目改造压缩成简历/面试版表述。
+1. 先读取本文档、`git status -sb` 和 `git log -5 --oneline --decorate`，确认主线提交仍以 `b4572fe` 为起点继续。
+2. 先读取 `docs/seckill-comparison-test-runbook.md`，里面记录了 worktree 路径、baseline/current 数据库差异、正常压测命令、故障注入命令和完成状态。
+3. 当前已完成 baseline/current 的 1000/5000 正常压测和故障注入对比；有效结果已整理到 `docs/benchmark-results.md` 和 `docs/reliability-results.md`。
+4. 后续更适合继续做 README/简历项目讲法、Prometheus 指标样例、订单状态补偿闭环，或进入下一个优化专题。
 5. 后续如果新建 `local-deals-mysql` / `local-deals-redis` 容器，再决定是否把脚本默认容器名从旧的 `hmdp-*` 迁移到 `local-deals-*`。
 
 ## 最近更新
 
 按时间倒序记录，最新内容放在最前面。每次只记录“做了什么、改了哪些文件、得到什么结论”，不要记录完整聊天过程。
+
+### 2026-05-20
+
+- 补充 `docs/benchmark-results.md` 和 `docs/reliability-results.md` 的表格阅读说明：解释 `Throughput`、`P95/P99`、`drain_ms`、`pending`、`dead-letter`、`retry_key_count` 等字段，并明确 baseline 正常压测通过不等于异常链路可靠。
+- 补齐 `reliable-stream-v1` 的 5000 线程正常压测：`2026-05-20-seckill-reliable-stream-v1-5000t-1l-r1`，订单 1000/1000，pending 0，dead-letter 0，`drain_ms=81`，结果为 `pass`。
+- 补齐 `reliable-stream-v1` 故障注入：`2026-05-20-seckill-reliable-stream-v1-fault-injection-r1`，缺少 `orderId` 的异常消息经过 3 次重试进入 `stream.orders.dlq`，pending 清空，结果为 `pass`。
+- 新增 `docs/reliability-results.md` 作为故障注入人工总览；更新 `docs/benchmark-results.md` 和 `docs/seckill-comparison-test-runbook.md`，将本轮对比状态从“待执行”改为“已补齐”。
+- 更新 README 首页表达，把“相比教程原型的核心优势”和“对比验证摘要”前置，明确优势是可靠性闭环、可观测性和自动化验证，而不是性能大幅提升。
+- 新增 `docs/seckill-comparison-test-runbook.md` 作为秒杀对比验证恢复入口，记录 baseline worktree、数据库差异、正常压测命令、故障注入命令、证据字段、通过标准和当前中断点。
+- 当前对比验证采用 git worktree，不在主仓库 `git switch` 回旧版本；baseline worktree 为 `/home/sd101t/IdeaProjects/hm-dianping-baseline`，最终证据仍写回主仓库。
+- 当前环境必须区分：baseline 使用 `hmdp-mysql` 容器中的 `hmdp` 数据库，current 使用同一 `hmdp-mysql` 容器中的 `local_deals` 数据库，Redis 均为 `hmdp-redis`。
+- 已实现 `scripts/run-seckill-reliability-check.sh`，用于向 `stream.orders` 注入缺少 `orderId` 的异常消息并记录 pending / DLQ 结果。
+- 已更新 `scripts/run-seckill-benchmark.sh`，支持 `--project-dir`、`--output-root` 和 `--jmeter-plan`，便于用主仓库脚本驱动 baseline worktree 并把证据统一写回主仓库。
+- 当前有效结果：baseline/current 的 1000/5000 正常压测均通过；baseline 故障注入表现为 pending 残留且 DLQ 为空，current 故障注入表现为 pending 清空且 DLQ 生成异常消息。
+- baseline 首两次 1000 线程尝试因为旧 JMX 硬编码 token 路径导致 2 个 401、订单 998/1000，应清理或明确标记为废弃证据，不纳入对比结论。
 
 ### 2026-05-19
 
@@ -73,7 +88,8 @@ scripts/run-seckill-benchmark.sh --threads 5000 --loops 5 --stock 1000 --user-co
 ### 当前观察
 
 - baseline 与 `reliable-stream-v1` 两组结果均通过业务正确性校验。
-- `reliable-stream-v1` 增加 DB 唯一索引兜底、pending 重试上限、dead-letter 和指标后，`drain_ms` 为 72-80 ms，和 baseline 的 75-81 ms 处在同一量级。
+- `reliable-stream-v1` 增加 DB 唯一索引兜底、pending 重试上限、dead-letter 和指标后，2026-05-20 对比验证的 `drain_ms` 为 72-81 ms，和 baseline 的 71-73 ms 处在同一量级。
+- 故障注入验证显示 baseline 对缺少 `orderId` 的异常 Stream 消息会留下 pending，`reliable-stream-v1` 会在有限重试后写入 `stream.orders.dlq` 并清空 pending。
 - `5000 线程 / 1 次循环` 仍然有 P99 秒级抖动，适合作为压力尖峰观察，不宜单独作为性能提升论据。
 - `5000 线程 / 5 次循环` 吞吐较高，主要因为库存耗尽后大量请求走快速拒绝路径，不能简单理解为完整下单能力提升。
 
@@ -85,6 +101,10 @@ scripts/run-seckill-benchmark.sh --threads 5000 --loops 5 --stock 1000 --user-co
   - 机器可读总表，每轮脚本压测自动更新。
 - `docs/JmeterTestSummary/seckill-reliable-v1/metrics.csv`
   - 可靠性增强版机器可读总表。
+- `docs/reliability-results.md`
+  - 故障注入人工总览，记录 baseline pending 残留和 current 进入 DLQ 的对比结论。
+- `docs/reliability-results/metrics.csv`
+  - 故障注入机器可读总表。
 - `docs/JmeterTestSummary/seckill-baseline-lua-stream/*-run-summary.md`
   - 每轮压测的完整证据快照。
 - `docs/JmeterTestSummary/seckill-reliable-v1/*-run-summary.md`
@@ -100,8 +120,12 @@ scripts/run-seckill-benchmark.sh --threads 5000 --loops 5 --stock 1000 --user-co
   - JMeter 脚本已参数化，支持通过 `-Jthreads`、`-Jloops`、`-JvoucherId`、`-JtokensFile` 等参数运行。
 - `docs/jmeter-usage.md`
   - 记录自动化脚本用法、参数含义、输出文件命名和 `drain_ms` 含义。
+- `docs/seckill-comparison-test-runbook.md`
+  - baseline/current 对比验证执行手册，包含 worktree 路径、数据库差异、压测命令、故障注入命令、证据字段和当前中断点。
 - `docs/benchmark-results.md`
   - 压测结果人工总览。
+- `docs/reliability-results.md`
+  - 故障注入结果人工总览。
 - `src/main/java/com/localdeals/service/impl/VoucherOrderServiceImpl.java`
   - 秒杀 Lua 判定、Redis Stream 入队、异步消费、pending/dead-letter 和落库幂等的核心实现位置。
 - `src/main/java/com/localdeals/config/SeckillProperties.java`
@@ -124,9 +148,11 @@ scripts/run-seckill-benchmark.sh --threads 5000 --loops 5 --stock 1000 --user-co
 
 ```text
 请先阅读 /home/sd101t/IdeaProjects/hm-dianping/docs/project-context.md，
+再阅读 /home/sd101t/IdeaProjects/hm-dianping/docs/seckill-comparison-test-runbook.md，
 再结合当前专题中列出的关键文件恢复 local-deals-service 项目上下文。
-当前 main/origin/main 最新提交应为 a9ae77a Repackage local deals seckill reliability。
-当前 reliable-stream-v1 已完成四组压测并写入 docs/benchmark-results.md，但故障注入 / dead-letter 闭环验证尚未实现。
-后续如果继续开发，先讨论是否按测试侧注入 Redis Stream 异常消息的方案补 docs/reliability-results.md。
-当前本机压测命令需要显式传入 --mysql-container hmdp-mysql --redis-container hmdp-redis。
+当前 main/origin/main 最新提交应为 b4572fe update project-context.md。
+当前 baseline 与 reliable-stream-v1 的 2026-05-20 秒杀对比验证已补齐：baseline worktree 在 /home/sd101t/IdeaProjects/hm-dianping-baseline。
+baseline 使用 hmdp-mysql 容器中的 hmdp 数据库，current 使用同一 hmdp-mysql 容器中的 local_deals 数据库，Redis 均为 hmdp-redis。
+已完成 baseline/current 的 1000/5000 正常压测和故障注入对比；结果入口是 docs/benchmark-results.md 和 docs/reliability-results.md。
+当前本机压测命令需要显式传入 --mysql-container hmdp-mysql --redis-container hmdp-redis，并按 runbook 指定 --mysql-database。
 ```
